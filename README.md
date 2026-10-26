@@ -10,7 +10,7 @@ It floats above every app and desktop and shows:
 
 - 🟠 **Needs you**: a session is blocked on a permission prompt or a question
 - 🔵 **Working**: Claude is busy in that session
-- 🟢 **Done**: a session just finished (the pet cheers; the card clears when you read that chat in Claude, or when you click it)
+- 🟢 **Done**: a chat finished and you haven't read it yet. It matches the Claude sidebar's blue dots and clears when you read the chat (or click the card).
 
 The pet reacts too: it sleeps when nothing is running, gets busy while Claude works, and jumps when something finishes.
 
@@ -126,21 +126,26 @@ Every running Claude Code session writes a small status file to `~/.claude/sessi
 - Only `*.json` files are read there. Nothing else in `~/.claude` is touched.
 - A session counts only while its process is alive (`kill(pid, 0)`).
 - A busy → idle change shows as **Done** after a 3 second debounce, and expires after 30 minutes.
-- For chats in the Claude desktop app, a **Done** card clears by itself once you've seen the chat: when you open it after it finished, or when it's the chat on screen as it finishes. The pet reads only the `lastFocusedAt` time from the app's per-chat file in `~/Library/Application Support/Claude/claude-code-sessions/`. Terminal sessions have no such file, so clear those by clicking the card.
+- For chats in the Claude desktop app, **Done** mirrors the app's own unread list (the sidebar's blue dots), so a card clears as soon as you read that chat in Claude, and unread chats show up even if their process has stopped or the pet was just started. The pet reads that list from the app's local storage log (`~/Library/Application Support/Claude/Local Storage/leveldb/*.log`, key `epitaxy-unread-v1`) and chat titles and times from `~/Library/Application Support/Claude/claude-code-sessions/`. If the list isn't available it falls back to comparing each chat's last turn with when you last opened it. Terminal sessions have no desktop chat, so they're done when the pet sees them finish, and clear when you click them.
 - The app makes no network requests. It writes only its own preferences (`defaults read local.claudepet`) and the pets you import.
 
-⚠️ That status file is an internal Claude Code detail, not a documented API. A future Claude Code update could change it and break the pet. If that happens, the parsing lives in `SessionStore.poll()`.
+⚠️ These files are internal details of Claude Code and the desktop app, not documented APIs. A future update could change them and break the pet. If that happens, the parsing lives in `SessionStore`, `DesktopChats` and `DesktopUnread`.
 
 ## Hacking on it
 
 Everything is in [`Sources/main.swift`](Sources/main.swift):
 
-- **`SessionStore`** reads the session files and tracks waiting/working/done.
+- **`SessionStore`** reads the session files and decides waiting/working/done. **`DesktopChats`** and **`DesktopUnread`** read the desktop app's chat files and unread list; **`LevelDBLog`** is a small reader for LevelDB write-ahead logs.
 - **`BuiltinPet` / `PixelPet` / `PetCanvas`** are the built-in pixel pets. Each row is a 16-character string and each character is a palette color (`K` outline, `O` body, `W` hair, `.` transparent). Add a `BuiltinPet` with its own top rows and colors, then list it in `BuiltinPet.all`.
 - **`SpriteSheet` / `PetLibrary` / `PetFigure`** load, import and animate Codex-format pets.
 - **`PetView` / `ControlPill` / `SessionStack` / `SessionToast`** are the SwiftUI interface.
 - **`AppDelegate`** creates the always-on-top, all-desktops panel and sizes it to its content.
 - **`IconRenderer`** draws the app icon from the Sprout sprite (`ClaudePet --render-icon <dir>`).
+
+### Tests and debugging
+
+- `./build.sh` runs the self-tests after compiling (`ClaudePet --self-test`). They check the unread logic, the LevelDB log reader, terminal-session timing, and sprite sheets against temporary folders, and the build fails if any check fails.
+- `ClaudePet.app/Contents/MacOS/ClaudePet --dump` prints what the pet sees right now (needs you / working / done), which is handy when the pet disagrees with the sidebar.
 
 ### Testing without real sessions
 

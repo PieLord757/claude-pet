@@ -18,6 +18,9 @@ if ! compile; then
   if (( ! ok )); then cat "${TMPDIR:-/tmp}/claudepet-build.log"; exit 1; fi
 fi
 
+# Self-tests: session logic, the LevelDB reader and sprite sheets.
+$APP/Contents/MacOS/ClaudePet --self-test
+
 # App icon, drawn from the pet sprite by the app itself.
 ICONSET="${TMPDIR:-/tmp}/ClaudePet.iconset"
 rm -rf "$ICONSET"
@@ -33,7 +36,7 @@ cat > $APP/Contents/Info.plist <<PLIST
   <key>CFBundleIdentifier</key><string>local.claudepet</string>
   <key>CFBundleExecutable</key><string>ClaudePet</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.2.1</string>
+  <key>CFBundleShortVersionString</key><string>0.3.0</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>LSUIElement</key><true/>

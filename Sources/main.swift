@@ -15,8 +15,8 @@ enum SessionState: String {
 }
 
 struct SessionInfo: Identifiable, Equatable {
-    let id: String          // sessionId
-    let pid: Int32
+    let id: String          // sessionId (or the desktop chat id for a chat with no process)
+    let pid: Int32          // 0 for a desktop chat whose process has stopped
     let name: String
     let state: SessionState
     let waitingFor: String?
@@ -37,95 +37,272 @@ struct RawSession: Decodable {
     let kind: String?
 }
 
+/// What the pet needs from one of the desktop app's per-chat files.
+struct DesktopChat: Equatable {
+    let hostId: String
+    let title: String?
+    let lastTurnEdgeAt: Double?     // ms
+    let lastActivityAt: Double?     // ms
+    let lastFocusedAt: Double?      // ms
+    let isArchived: Bool
+}
+
+/// Reads the desktop app's per-chat files (<account>/<org>/local_<id>.json),
+/// re-parsing a file only when it changes.
+final class DesktopChats {
+    let dir: URL
+    private var cache: [String: (modified: Date, chat: DesktopChat?)] = [:]
+    init(dir: URL) { self.dir = dir }
+
+    func load() -> [String: DesktopChat] {
+        let fm = FileManager.default
+        var out: [String: DesktopChat] = [:]
+        var seen = Set<String>()
+        for a in (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [] {
+            for b in (try? fm.contentsOfDirectory(at: a, includingPropertiesForKeys: nil)) ?? [] {
+                for f in (try? fm.contentsOfDirectory(at: b, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+                where f.pathExtension == "json" && f.lastPathComponent.hasPrefix("local_") {
+                    let hostId = f.deletingPathExtension().lastPathComponent
+                    seen.insert(f.path)
+                    guard let modified = (try? f.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+                    else { continue }
+                    if let c = cache[f.path], c.modified == modified {
+                        if let chat = c.chat { out[hostId] = chat }
+                        continue
+                    }
+                    let json = (try? Data(contentsOf: f)).flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
+                    // A file caught mid-write doesn't parse: keep the last good copy and retry next time.
+                    guard let json else {
+                        if let chat = cache[f.path]?.chat { out[hostId] = chat }
+                        continue
+                    }
+                    let chat = DesktopChat(hostId: hostId,
+                                           title: json["title"] as? String,
+                                           lastTurnEdgeAt: (json["lastTurnEdgeAt"] as? NSNumber)?.doubleValue,
+                                           lastActivityAt: (json["lastActivityAt"] as? NSNumber)?.doubleValue,
+                                           lastFocusedAt: (json["lastFocusedAt"] as? NSNumber)?.doubleValue,
+                                           isArchived: (json["isArchived"] as? Bool) ?? false)
+                    cache[f.path] = (modified, chat)
+                    out[hostId] = chat
+                }
+            }
+        }
+        cache = cache.filter { seen.contains($0.key) }
+        return out
+    }
+}
+
+/// Reads the newest write of one key from a LevelDB write-ahead log (`*.log`).
+/// The desktop app's local storage is LevelDB; recent writes sit in the log uncompressed.
+enum LevelDBLog {
+    static let blockSize = 32768
+
+    /// The last value put under a key ending in `keySuffix`, or nil if the log never wrote it.
+    /// `.some(nil)` means the key's latest entry is a delete.
+    static func lastValue(in bytes: [UInt8], keySuffix: [UInt8]) -> [UInt8]?? {
+        var result: [UInt8]?? = nil
+        for record in records(bytes) {
+            guard let entries = batchEntries(record) else { continue }
+            for (key, value) in entries where key.count >= keySuffix.count && Array(key.suffix(keySuffix.count)) == keySuffix {
+                result = .some(value)
+            }
+        }
+        return result
+    }
+
+    /// Reassembles the log's physical fragments (FULL/FIRST/MIDDLE/LAST) into records.
+    static func records(_ b: [UInt8]) -> [[UInt8]] {
+        var out: [[UInt8]] = []
+        var pending: [UInt8] = []
+        var blockStart = 0
+        while blockStart < b.count {
+            let blockEnd = min(blockStart + blockSize, b.count)
+            var p = blockStart
+            while p + 7 <= blockEnd {
+                let len = Int(b[p + 4]) | Int(b[p + 5]) << 8
+                let type = b[p + 6]
+                if type == 0 && len == 0 { break }               // zero padding at the end of a block
+                let start = p + 7, end = start + len
+                guard end <= blockEnd else { break }
+                switch type {
+                case 1: out.append(Array(b[start..<end])); pending = []
+                case 2: pending = Array(b[start..<end])
+                case 3: pending += b[start..<end]
+                case 4: pending += b[start..<end]; out.append(pending); pending = []
+                default: break
+                }
+                p = end
+            }
+            blockStart += blockSize
+        }
+        return out
+    }
+
+    /// A write batch: 8-byte sequence, 4-byte count, then (tag, key, [value]) entries.
+    /// Returns (key, value) pairs; a delete has a nil value.
+    static func batchEntries(_ r: [UInt8]) -> [([UInt8], [UInt8]?)]? {
+        guard r.count >= 12 else { return nil }
+        let count = Int(r[8]) | Int(r[9]) << 8 | Int(r[10]) << 16 | Int(r[11]) << 24
+        var i = 12
+        var out: [([UInt8], [UInt8]?)] = []
+        func varint() -> Int? {
+            var v = 0, shift = 0
+            while i < r.count, shift < 35 {
+                let byte = r[i]; i += 1
+                v |= Int(byte & 0x7f) << shift
+                if byte & 0x80 == 0 { return v }
+                shift += 7
+            }
+            return nil
+        }
+        func slice() -> [UInt8]? {
+            guard let n = varint(), n >= 0, i + n <= r.count else { return nil }
+            defer { i += n }
+            return Array(r[i..<i + n])
+        }
+        for _ in 0..<count {
+            guard i < r.count else { return nil }
+            let tag = r[i]; i += 1
+            guard let key = slice() else { return nil }
+            if tag == 1 {
+                guard let value = slice() else { return nil }
+                out.append((key, value))
+            } else if tag == 0 {
+                out.append((key, nil))
+            } else {
+                return nil
+            }
+        }
+        return out
+    }
+
+    /// Chromium local storage values start with 0 (UTF-16LE) or 1 (Latin-1).
+    static func decodeLocalStorageValue(_ v: [UInt8]) -> String? {
+        guard let first = v.first else { return nil }
+        let rest = Data(v.dropFirst())
+        switch first {
+        case 0: return String(data: rest, encoding: .utf16LittleEndian)
+        case 1: return String(data: rest, encoding: .isoLatin1)
+        default: return String(data: Data(v), encoding: .utf8)
+        }
+    }
+}
+
+/// The desktop app's own list of unread Code chats (the sidebar's blue dots),
+/// from the `epitaxy-unread-v1` local storage key.
+final class DesktopUnread {
+    let leveldbDir: URL
+    let defaults: UserDefaults
+    private var lastRead: (path: String, size: Int, modified: Date)?
+    /// The latest list seen. Survives log compaction, which moves the key out of the log
+    /// until the app next writes it.
+    private(set) var ids: Set<String>?
+
+    init(leveldbDir: URL, defaults: UserDefaults) {
+        self.leveldbDir = leveldbDir
+        self.defaults = defaults
+        if let saved = defaults.stringArray(forKey: "lastUnreadIds") { ids = Set(saved) }
+    }
+
+    static func parse(_ json: String) -> Set<String>? {
+        guard let data = json.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let state = obj["state"] as? [String: Any] else { return nil }
+        let unread = state["unreadIds"] as? [String] ?? []
+        let explicit = state["explicitUnreadIds"] as? [String] ?? []
+        return Set(unread + explicit)
+    }
+
+    func refresh() {
+        let fm = FileManager.default
+        let logs = ((try? fm.contentsOfDirectory(at: leveldbDir, includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey])) ?? [])
+            .filter { $0.pathExtension == "log" }
+        guard let newest = logs.max(by: { $0.lastPathComponent < $1.lastPathComponent }),
+              let rv = try? newest.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]),
+              let size = rv.fileSize, let modified = rv.contentModificationDate else { return }
+        if let l = lastRead, l.path == newest.path, l.size == size, l.modified == modified { return }
+        lastRead = (newest.path, size, modified)
+        guard let data = try? Data(contentsOf: newest) else { return }
+        switch LevelDBLog.lastValue(in: [UInt8](data), keySuffix: Array("epitaxy-unread-v1".utf8)) {
+        case .some(.some(let v)):
+            if let s = LevelDBLog.decodeLocalStorageValue(v), let parsed = Self.parse(s) {
+                ids = parsed
+                defaults.set(Array(parsed).sorted(), forKey: "lastUnreadIds")
+            }
+        case .some(.none):
+            ids = []
+        case .none:
+            break      // not in this log (compacted away): keep the last list we saw
+        }
+    }
+}
+
 final class SessionStore: ObservableObject {
     @Published var sessions: [SessionInfo] = []
-    /// sessionId -> when it finished (busy -> idle). Cleared on click or after a while.
+    /// id -> when it finished, for every session shown as done.
     @Published var finished: [String: Date] = [:]
 
-    // CLAUDE_PET_SESSIONS_DIR points the pet at another folder (used for testing).
-    private let dir = ProcessInfo.processInfo.environment["CLAUDE_PET_SESSIONS_DIR"].map { URL(fileURLWithPath: $0) }
-        ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/sessions")
+    let sessionsDir: URL
+    let desktop: DesktopChats
+    let unread: DesktopUnread
+    var now: () -> Date = Date.init                   // replaceable in tests
+
     private var lastGood: [String: RawSession] = [:]       // file name -> last decodable contents
     private var previousState: [String: SessionState] = [:]
     private var idleSince: [String: Date] = [:]           // debounce busy -> idle flicker
+    private var terminalFinished: [String: Date] = [:]    // sessions with no desktop chat
+    private var dismissedDesktop: [String: Double] = [:]  // hostId -> lastTurnEdgeAt when dismissed
     private var timer: Timer?
-
-    // The desktop app keeps one file per Code-tab chat, named by its hostSessionId,
-    // with `lastFocusedAt` (ms) updated whenever that chat comes on screen.
-    private let desktopDir = ProcessInfo.processInfo.environment["CLAUDE_PET_DESKTOP_DIR"].map { URL(fileURLWithPath: $0) }
-        ?? FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/Claude/claude-code-sessions")
-    private var desktopPaths: [String: URL] = [:]
-    private var focusCache: [String: (modified: Date, focusedAt: Double?)] = [:]
 
     static let doneDebounce: TimeInterval = 3
     static let doneExpiry: TimeInterval = 30 * 60
 
+    init(sessionsDir: URL? = nil, desktopDir: URL? = nil, leveldbDir: URL? = nil, defaults: UserDefaults = .standard) {
+        let env = ProcessInfo.processInfo.environment
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let claude = home.appendingPathComponent("Library/Application Support/Claude")
+        self.sessionsDir = sessionsDir ?? env["CLAUDE_PET_SESSIONS_DIR"].map { URL(fileURLWithPath: $0) }
+            ?? home.appendingPathComponent(".claude/sessions")
+        desktop = DesktopChats(dir: desktopDir ?? env["CLAUDE_PET_DESKTOP_DIR"].map { URL(fileURLWithPath: $0) }
+            ?? claude.appendingPathComponent("claude-code-sessions"))
+        unread = DesktopUnread(leveldbDir: leveldbDir ?? env["CLAUDE_PET_LEVELDB_DIR"].map { URL(fileURLWithPath: $0) }
+            ?? claude.appendingPathComponent("Local Storage/leveldb"), defaults: defaults)
+    }
+
     func start() {
         poll()
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in self?.poll() }
+        let t = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in self?.poll() }
+        RunLoop.main.add(t, forMode: .common)     // keep polling while a menu is open
+        timer = t
     }
 
-    func dismissFinished(_ id: String) { finished[id] = nil }
-    func dismissAllFinished() { finished.removeAll() }
-
-    /// Drops "done" entries for desktop chats you've already looked at: opened after they
-    /// finished, or on screen right now (Claude in front with that chat focused last).
-    private func clearReadInDesktopApp(_ finished: inout [String: Date], sessions: [SessionInfo]) {
-        guard !finished.isEmpty else { return }
-        let claudeInFront = NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.anthropic.claudefordesktop"
-        var onScreen: String?
-        if claudeInFront {
-            onScreen = sessions.compactMap { s -> (String, Double)? in
-                guard let h = s.hostSessionId, let f = lastFocusedAt(h) else { return nil }
-                return (s.id, f)
-            }.max { $0.1 < $1.1 }?.0
+    func dismissFinished(_ id: String) {
+        if let s = sessions.first(where: { $0.id == id }), let h = s.hostSessionId {
+            dismissedDesktop[h] = desktopChats[h]?.lastTurnEdgeAt ?? 0
         }
-        for (id, since) in finished {
-            guard let s = sessions.first(where: { $0.id == id }), let h = s.hostSessionId else { continue }
-            if id == onScreen {
-                finished[id] = nil
-            } else if let f = lastFocusedAt(h), f / 1000 >= since.timeIntervalSince1970 {
-                finished[id] = nil
-            }
-        }
+        terminalFinished[id] = nil
+        finished[id] = nil
     }
 
-    private func lastFocusedAt(_ hostId: String) -> Double? {
-        guard let url = desktopPath(hostId),
-              let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-        else { return nil }
-        if let c = focusCache[hostId], c.modified == modified { return c.focusedAt }
-        let json = (try? Data(contentsOf: url)).flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
-        let focusedAt = (json?["lastFocusedAt"] as? NSNumber)?.doubleValue
-        focusCache[hostId] = (modified, focusedAt)
-        return focusedAt
+    func dismissAllFinished() {
+        for id in finished.keys { dismissFinished(id) }
     }
 
-    private func desktopPath(_ hostId: String) -> URL? {
-        if let u = desktopPaths[hostId], FileManager.default.fileExists(atPath: u.path) { return u }
-        let fm = FileManager.default
-        let name = hostId + ".json"
-        // <account>/<org>/<hostSessionId>.json
-        for a in (try? fm.contentsOfDirectory(at: desktopDir, includingPropertiesForKeys: nil)) ?? [] {
-            for b in (try? fm.contentsOfDirectory(at: a, includingPropertiesForKeys: nil)) ?? [] {
-                let u = b.appendingPathComponent(name)
-                if fm.fileExists(atPath: u.path) { desktopPaths[hostId] = u; return u }
-            }
-        }
-        return nil
-    }
+    private var desktopChats: [String: DesktopChat] = [:]
 
     private func isAlive(_ pid: Int32) -> Bool {
         kill(pid, 0) == 0 || errno == EPERM
     }
 
-    private func poll() {
-        let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+    func poll() {
+        let now = now()
+        desktopChats = desktop.load()
+        unread.refresh()
+
+        // Live sessions from ~/.claude/sessions.
+        let files = (try? FileManager.default.contentsOfDirectory(at: sessionsDir, includingPropertiesForKeys: nil)) ?? []
         var seenFiles = Set<String>()
         var result: [SessionInfo] = []
-        let now = Date()
-
         for url in files where url.pathExtension == "json" {
             let key = url.lastPathComponent
             seenFiles.insert(key)
@@ -140,7 +317,9 @@ final class SessionStore: ObservableObject {
                   let state = SessionState(rawValue: statusStr),
                   isAlive(raw.pid) else { continue }
 
-            let name = (raw.name?.isEmpty == false ? raw.name! : nil)
+            // A desktop chat goes by its sidebar title.
+            let name = raw.hostSessionId.flatMap { desktopChats[$0]?.title }
+                ?? (raw.name?.isEmpty == false ? raw.name! : nil)
                 ?? raw.cwd.map { URL(fileURLWithPath: $0).lastPathComponent }
                 ?? "Session \(raw.pid)"
             let ts = (raw.statusUpdatedAt ?? raw.updatedAt ?? 0) / 1000
@@ -151,32 +330,76 @@ final class SessionStore: ObservableObject {
         }
         lastGood = lastGood.filter { seenFiles.contains($0.key) }
 
-        // Track busy -> idle transitions as "finished", after a short debounce.
-        var newFinished = finished
+        // One entry per desktop chat: a chat can have more than one process; keep the most urgent.
+        func rank(_ s: SessionInfo) -> Int {
+            switch s.state { case .waiting: return 0; case .busy: return 1; case .idle: return 2 }
+        }
+        var byHost: [String: SessionInfo] = [:]
+        for s in result {
+            guard let h = s.hostSessionId else { continue }
+            if let other = byHost[h],
+               (rank(other), -other.statusUpdatedAt.timeIntervalSince1970) <= (rank(s), -s.statusUpdatedAt.timeIntervalSince1970) {
+                continue
+            }
+            byHost[h] = s
+        }
+        result = result.filter { s in s.hostSessionId.map { byHost[$0]?.id == s.id } ?? true }
+
+        // Terminal sessions: "done" is a busy -> idle change seen while the pet runs, after a debounce.
         for s in result {
             let prev = previousState[s.id]
             if s.state == .idle {
                 if prev == .busy || prev == .waiting { idleSince[s.id] = now }
                 if let since = idleSince[s.id], now.timeIntervalSince(since) >= Self.doneDebounce {
-                    newFinished[s.id] = since
+                    terminalFinished[s.id] = since
                     idleSince[s.id] = nil
                 }
+                previousState[s.id] = .idle
             } else {
                 idleSince[s.id] = nil
-                newFinished[s.id] = nil      // started working again
+                terminalFinished[s.id] = nil
+                previousState[s.id] = s.state
             }
-            // Only move previousState forward once a pending idle has settled.
-            if !(s.state == .idle && idleSince[s.id] != nil) { previousState[s.id] = s.state }
-            else { previousState[s.id] = .idle }
         }
         let liveIds = Set(result.map(\.id))
-        newFinished = newFinished.filter { liveIds.contains($0.key) && now.timeIntervalSince($0.value) < Self.doneExpiry }
-        clearReadInDesktopApp(&newFinished, sessions: result)
+        terminalFinished = terminalFinished.filter { liveIds.contains($0.key) && now.timeIntervalSince($0.value) < Self.doneExpiry }
+        idleSince = idleSince.filter { liveIds.contains($0.key) }
+        previousState = previousState.filter { liveIds.contains($0.key) }
+
+        // Desktop chats: "done" is whatever the desktop app shows as unread.
+        let liveHostIds = Set(result.compactMap(\.hostSessionId))
+        var newFinished: [String: Date] = [:]
+        func isUnread(_ chat: DesktopChat) -> Bool {
+            if chat.isArchived { return false }
+            if let ids = unread.ids { return ids.contains(chat.hostId) }
+            // No list from the app yet: a turn that ended after the chat was last opened.
+            guard let edge = chat.lastTurnEdgeAt ?? chat.lastActivityAt else { return false }
+            return edge > (chat.lastFocusedAt ?? 0)
+        }
+        func edgeDate(_ chat: DesktopChat?) -> Date? {
+            (chat?.lastTurnEdgeAt ?? chat?.lastActivityAt).map { Date(timeIntervalSince1970: $0 / 1000) }
+        }
+        for s in result where s.state == .idle {
+            if let h = s.hostSessionId, let chat = desktopChats[h] {
+                if isUnread(chat), (dismissedDesktop[h].map { (chat.lastTurnEdgeAt ?? 0) > $0 } ?? true) {
+                    newFinished[s.id] = edgeDate(chat) ?? s.statusUpdatedAt
+                }
+            } else if let t = terminalFinished[s.id] {
+                newFinished[s.id] = t
+            }
+        }
+        // Unread desktop chats whose process has stopped still belong on the list.
+        for chat in desktopChats.values where !liveHostIds.contains(chat.hostId) && isUnread(chat) {
+            if let d = dismissedDesktop[chat.hostId], (chat.lastTurnEdgeAt ?? 0) <= d { continue }
+            let at = edgeDate(chat) ?? .distantPast
+            result.append(SessionInfo(id: chat.hostId, pid: 0, name: chat.title ?? "Untitled chat", state: .idle,
+                                      waitingFor: nil, statusUpdatedAt: at, hostSessionId: chat.hostId))
+            newFinished[chat.hostId] = at
+        }
+        // A dismissal lasts until that chat is read in the app (then it's forgotten).
+        dismissedDesktop = dismissedDesktop.filter { h, _ in desktopChats[h].map(isUnread) ?? false }
 
         result.sort { a, b in
-            func rank(_ s: SessionInfo) -> Int {
-                switch s.state { case .waiting: return 0; case .busy: return 1; case .idle: return 2 }
-            }
             if rank(a) != rank(b) { return rank(a) < rank(b) }
             return a.statusUpdatedAt > b.statusUpdatedAt
         }
@@ -190,7 +413,7 @@ final class SessionStore: ObservableObject {
         sessions.filter { $0.state == .idle && finished[$0.id] != nil }
             .sorted { (finished[$0.id] ?? .distantPast) > (finished[$1.id] ?? .distantPast) }
     }
-    var idleCount: Int { sessions.filter { $0.state == .idle && finished[$0.id] == nil }.count }
+    var idleCount: Int { sessions.filter { $0.state == .idle && finished[$0.id] == nil && $0.pid != 0 }.count }
 }
 
 // MARK: - Built-in pixel pets
@@ -596,7 +819,8 @@ func ago(_ d: Date) -> String {
     let s = max(0, Int(Date().timeIntervalSince(d)))
     if s < 60 { return "\(s)s" }
     if s < 3600 { return "\(s / 60)m" }
-    return "\(s / 3600)h"
+    if s < 48 * 3600 { return "\(s / 3600)h" }
+    return "\(s / 86400)d"
 }
 
 struct PetView: View {
@@ -928,6 +1152,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             resetPosition()
         }
         panel.orderFrontRegardless()
+
+        // Keep the pet on screen: displays come and go, and nothing should leave it hidden.
+        NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
+                                               object: nil, queue: .main) { [weak self] _ in self?.keepOnScreen() }
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification,
+                                                          object: nil, queue: .main) { [weak self] _ in
+            self?.panel.orderFrontRegardless()
+        }
+        let watchdog = Timer(timeInterval: 5, repeats: true) { [weak self] _ in
+            guard let self, let panel = self.panel else { return }
+            if !panel.isVisible { panel.orderFrontRegardless() }
+            self.keepOnScreen()
+        }
+        RunLoop.main.add(watchdog, forMode: .common)
+        // Polling and animation shouldn't be throttled by App Nap while the pet is up.
+        activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiatedAllowingIdleSystemSleep],
+                                                          reason: "Watching Claude Code sessions")
+    }
+
+    private var activity: NSObjectProtocol?
+
+    /// Moves the panel back if no screen shows its top edge anymore.
+    func keepOnScreen() {
+        guard let panel else { return }
+        let top = NSPoint(x: panel.frame.minX + 40, y: panel.frame.maxY - 20)
+        if !NSScreen.screens.contains(where: { $0.visibleFrame.contains(top) }) {
+            place(topLeft: NSPoint(x: panel.frame.minX, y: panel.frame.maxY))
+            if !NSScreen.screens.contains(where: { $0.visibleFrame.contains(NSPoint(x: panel.frame.minX + 40, y: panel.frame.maxY - 20)) }) {
+                resetPosition()
+            }
+            savePosition()
+        }
     }
 
     /// Resizes the panel to the content, keeping its top-left corner where it is.
@@ -1056,6 +1312,294 @@ enum IconRenderer {
     }
 }
 
+// MARK: - Self-test
+
+/// `ClaudePet --self-test` checks the session logic against fake folders and exits
+/// non-zero on failure. build.sh runs it after compiling.
+enum SelfTest {
+    static var failures = 0
+    static var checks = 0
+
+    static func expect(_ cond: @autoclosure () -> Bool, _ what: String, line: Int = #line) {
+        checks += 1
+        if !cond() { failures += 1; print("  ✗ \(what) (line \(line))") }
+    }
+
+    static func run() -> Int32 {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("claudepet-test-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let defaults = UserDefaults(suiteName: "local.claudepet.selftest")!
+        defaults.removePersistentDomain(forName: "local.claudepet.selftest")
+
+        print("LevelDB log"); testLevelDB()
+        print("Desktop unread list"); testUnreadStore(root.appendingPathComponent("a"), defaults)
+        print("Fallback without the app's list"); testFallback(root.appendingPathComponent("b"), defaults)
+        print("Terminal sessions"); testTerminal(root.appendingPathComponent("c"), defaults)
+        print("Sprite sheets"); testSpriteSheet(root.appendingPathComponent("d"))
+
+        defaults.removePersistentDomain(forName: "local.claudepet.selftest")
+        print(failures == 0 ? "All \(checks) checks passed." : "\(failures) of \(checks) checks failed.")
+        return failures == 0 ? 0 : 1
+    }
+
+    // MARK: Fixtures
+
+    static func varint(_ n: Int) -> [UInt8] {
+        var n = n, out: [UInt8] = []
+        while n >= 0x80 { out.append(UInt8(n & 0x7f) | 0x80); n >>= 7 }
+        out.append(UInt8(n))
+        return out
+    }
+
+    static func batch(seq: Int, _ entries: [([UInt8], [UInt8]?)]) -> [UInt8] {
+        var b = [UInt8](repeating: 0, count: 8)
+        b[0] = UInt8(seq & 0xff)
+        let c = entries.count
+        b += [UInt8(c & 0xff), UInt8((c >> 8) & 0xff), 0, 0]
+        for (k, v) in entries {
+            b.append(v == nil ? 0 : 1)
+            b += varint(k.count) + k
+            if let v { b += varint(v.count) + v }
+        }
+        return b
+    }
+
+    /// Lays records out the way LevelDB does: 32 KB blocks, records split across them.
+    static func log(_ records: [[UInt8]]) -> [UInt8] {
+        var out: [UInt8] = []
+        for r in records {
+            var rest = r[...]
+            var first = true
+            repeat {
+                let left = LevelDBLog.blockSize - out.count % LevelDBLog.blockSize
+                if left < 7 { out += [UInt8](repeating: 0, count: left); continue }
+                let n = min(rest.count, left - 7)
+                let last = n == rest.count
+                let type: UInt8 = first ? (last ? 1 : 2) : (last ? 4 : 3)
+                out += [0, 0, 0, 0, UInt8(n & 0xff), UInt8(n >> 8), type]
+                out += rest.prefix(n)
+                rest = rest.dropFirst(n)
+                first = false
+            } while !rest.isEmpty
+        }
+        return out
+    }
+
+    static let unreadKey = Array("_https://claude.ai\u{0}\u{1}epitaxy-unread-v1".utf8)
+
+    static func unreadValue(_ ids: [String]) -> [UInt8] {
+        let json = "{\"state\":{\"unreadIds\":[\(ids.map { "\"\($0)\"" }.joined(separator: ","))],\"explicitUnreadIds\":[]},\"version\":0}"
+        return [1] + Array(json.utf8)
+    }
+
+    static func write(_ bytes: [UInt8], to url: URL, bump: TimeInterval = 0) {
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? Data(bytes).write(to: url)
+        // Push the modification time forward so caches keyed on it always notice the change.
+        let t = Date().addingTimeInterval(bump)
+        try? FileManager.default.setAttributes([.modificationDate: t], ofItemAtPath: url.path)
+    }
+
+    static func writeJSON(_ obj: [String: Any], to url: URL, bump: TimeInterval = 0) {
+        write([UInt8](try! JSONSerialization.data(withJSONObject: obj)), to: url, bump: bump)
+    }
+
+    static let me = Int(getpid())          // a pid that is certainly alive
+    static let dead = 999_999              // and one that isn't
+
+    static func session(_ dir: URL, pid: Int, file: String? = nil, id: String, host: String?, name: String, status: String) {
+        var o: [String: Any] = ["pid": pid, "sessionId": id, "name": name, "status": status, "statusUpdatedAt": 1_000_000]
+        if let host { o["hostSessionId"] = host }
+        writeJSON(o, to: dir.appendingPathComponent(file ?? "\(id).json"))
+    }
+
+    static func chat(_ dir: URL, _ host: String, title: String, edge: Double, focused: Double, archived: Bool = false, bump: TimeInterval = 0) {
+        writeJSON(["title": title, "lastTurnEdgeAt": edge, "lastFocusedAt": focused, "isArchived": archived],
+                  to: dir.appendingPathComponent("acct/org/\(host).json"), bump: bump)
+    }
+
+    // MARK: Tests
+
+    static func testLevelDB() {
+        let filler = [UInt8](repeating: 7, count: LevelDBLog.blockSize - 7 - 40)
+        let recs = [
+            batch(seq: 1, [(unreadKey, unreadValue(["local_old"]))]),
+            batch(seq: 2, [(Array("other".utf8), filler)]),
+            batch(seq: 3, [(Array("x".utf8), [1, 2]), (unreadKey, unreadValue(["local_a", "local_b"]))]),   // straddles a block
+        ]
+        let bytes = log(recs)
+        expect(LevelDBLog.records(bytes).count == 3, "reassembles 3 records across blocks")
+        if case .some(.some(let v)) = LevelDBLog.lastValue(in: bytes, keySuffix: Array("epitaxy-unread-v1".utf8)),
+           let s = LevelDBLog.decodeLocalStorageValue(v) {
+            expect(DesktopUnread.parse(s) == ["local_a", "local_b"], "last write wins")
+        } else {
+            expect(false, "finds the key")
+        }
+        let deleted = log(recs + [batch(seq: 4, [(unreadKey, nil)])])
+        if case .some(.none) = LevelDBLog.lastValue(in: deleted, keySuffix: Array("epitaxy-unread-v1".utf8)) {
+            expect(true, "")
+        } else {
+            expect(false, "a delete is reported as a delete")
+        }
+        let missing = LevelDBLog.lastValue(in: log([batch(seq: 1, [(Array("k".utf8), [1])])]), keySuffix: Array("nope".utf8))
+        expect(missing == nil, "absent key is nil")
+        expect(LevelDBLog.lastValue(in: [1, 2, 3], keySuffix: [1]) == nil, "garbage doesn't crash")
+        let utf16: [UInt8] = [0] + Array("{\"a\":1}".data(using: .utf16LittleEndian)!)
+        expect(LevelDBLog.decodeLocalStorageValue(utf16) == "{\"a\":1}", "decodes UTF-16 values")
+    }
+
+    static func testUnreadStore(_ root: URL, _ defaults: UserDefaults) {
+        let sessions = root.appendingPathComponent("sessions"), desk = root.appendingPathComponent("desk")
+        let ldb = root.appendingPathComponent("ldb")
+        session(sessions, pid: me, id: "s-a", host: "local_a", name: "A idle unread", status: "idle")
+        session(sessions, pid: me, id: "s-c", host: "local_c", name: "C busy", status: "busy")
+        session(sessions, pid: me, id: "s-d", host: "local_d", name: "D idle read", status: "idle")
+        chat(desk, "local_a", title: "A", edge: 5000, focused: 1000)
+        chat(desk, "local_b", title: "B no process", edge: 6000, focused: 1000)
+        chat(desk, "local_c", title: "C", edge: 5000, focused: 1000)
+        chat(desk, "local_d", title: "D", edge: 1000, focused: 5000)
+        chat(desk, "local_z", title: "Z archived", edge: 9000, focused: 1000, archived: true)
+        write(log([batch(seq: 1, [(unreadKey, unreadValue(["local_a", "local_b", "local_c", "local_z"]))])]),
+              to: ldb.appendingPathComponent("000003.log"))
+
+        let store = SessionStore(sessionsDir: sessions, desktopDir: desk, leveldbDir: ldb, defaults: defaults)
+        store.poll()
+        let done = Set(store.done.map(\.id))
+        expect(done == ["s-a", "local_b"], "done = unread idle chats, with and without a process (got \(done))")
+        expect(store.busy.map(\.id) == ["s-c"], "an unread busy chat shows as working only")
+        expect(store.done.first?.id == "local_b", "newest finish first")
+        expect(store.sessions.first { $0.id == "local_b" }?.name == "B no process", "a chat with no process keeps its title")
+        expect(!done.contains("local_z"), "archived chats are skipped")
+
+        // Two processes on one desktop chat show once, under the chat's title, most urgent first.
+        session(sessions, pid: me, id: "s-a2", host: "local_a", name: "a side process", status: "idle")
+        store.poll()
+        expect(store.sessions.filter { $0.hostSessionId == "local_a" }.count == 1, "one entry per desktop chat")
+        expect(store.sessions.first { $0.hostSessionId == "local_a" }?.name == "A", "uses the sidebar title")
+        session(sessions, pid: me, id: "s-a2", host: "local_a", name: "a side process", status: "busy")
+        store.poll()
+        expect(store.busy.map(\.id).contains("s-a2") && store.done.allSatisfy { $0.hostSessionId != "local_a" },
+               "a busy process wins over an idle one")
+        try? FileManager.default.removeItem(at: sessions.appendingPathComponent("s-a2.json"))
+        store.poll()
+
+        // A chat with no turn time uses its last activity for the card's time.
+        writeJSON(["title": "Old", "lastActivityAt": 4000.0, "lastFocusedAt": 1000.0],
+                  to: desk.appendingPathComponent("acct/org/local_old.json"))
+        write(log([batch(seq: 1, [(unreadKey, unreadValue(["local_a", "local_b", "local_old"]))])]),
+              to: ldb.appendingPathComponent("000003.log"), bump: 1)
+        store.poll()
+        expect(store.finished["local_old"] == Date(timeIntervalSince1970: 4), "falls back to last activity time")
+        try? FileManager.default.removeItem(at: desk.appendingPathComponent("acct/org/local_old.json"))
+
+        // Read in the app: A leaves the list.
+        write(log([batch(seq: 1, [(unreadKey, unreadValue(["local_a", "local_b"]))]),
+                   batch(seq: 2, [(unreadKey, unreadValue(["local_b"]))])]),
+              to: ldb.appendingPathComponent("000003.log"), bump: 2)
+        store.poll()
+        expect(Set(store.done.map(\.id)) == ["local_b"], "a chat read in the app clears")
+
+        // Dismissed in the pet: hidden until that chat has a new turn.
+        store.dismissFinished("local_b")
+        store.poll()
+        expect(store.done.isEmpty, "dismissed chat stays hidden")
+        chat(desk, "local_b", title: "B no process", edge: 7000, focused: 1000, bump: 3)
+        store.poll()
+        expect(store.done.map(\.id) == ["local_b"], "a new turn brings a dismissed chat back")
+
+        // Log compacted away (new empty log): the last list is kept.
+        try? FileManager.default.removeItem(at: ldb.appendingPathComponent("000003.log"))
+        write(log([batch(seq: 9, [(Array("unrelated".utf8), [1, 65])])]), to: ldb.appendingPathComponent("000005.log"), bump: 4)
+        store.poll()
+        expect(store.done.map(\.id) == ["local_b"], "keeps the last list after compaction")
+
+        // A fresh pet (restart) remembers the list too.
+        let again = SessionStore(sessionsDir: sessions, desktopDir: desk, leveldbDir: ldb, defaults: defaults)
+        again.poll()
+        expect(again.done.map(\.id) == ["local_b"], "restart restores the last list")
+
+        // Half-written session file: keep the last good copy.
+        write(Array("{\"pid\": 1, \"sess".utf8), to: sessions.appendingPathComponent("s-c.json"), bump: 5)
+        store.poll()
+        expect(store.busy.map(\.id) == ["s-c"], "a half-written file keeps its last good state")
+
+        // Process gone: the session drops off.
+        session(sessions, pid: dead, id: "s-c", host: "local_c", name: "C busy", status: "busy")
+        store.poll()
+        expect(store.busy.isEmpty, "dead processes are dropped")
+    }
+
+    static func testFallback(_ root: URL, _ defaults: UserDefaults) {
+        defaults.removeObject(forKey: "lastUnreadIds")
+        let sessions = root.appendingPathComponent("sessions"), desk = root.appendingPathComponent("desk")
+        session(sessions, pid: me, id: "s-e", host: "local_e", name: "E", status: "idle")
+        chat(desk, "local_e", title: "E", edge: 5000, focused: 1000)
+        chat(desk, "local_f", title: "F", edge: 1000, focused: 5000)
+        let store = SessionStore(sessionsDir: sessions, desktopDir: desk,
+                                 leveldbDir: root.appendingPathComponent("missing"), defaults: defaults)
+        store.poll()
+        expect(Set(store.done.map(\.id)) == ["s-e"], "without the app's list, a turn after the last open counts as unread")
+        chat(desk, "local_e", title: "E", edge: 5000, focused: 6000, bump: 2)
+        store.poll()
+        expect(store.done.isEmpty, "opening the chat clears it")
+    }
+
+    static func testTerminal(_ root: URL, _ defaults: UserDefaults) {
+        defaults.removeObject(forKey: "lastUnreadIds")
+        let sessions = root.appendingPathComponent("sessions")
+        var clock = Date(timeIntervalSince1970: 2_000_000_000)
+        let store = SessionStore(sessionsDir: sessions, desktopDir: root.appendingPathComponent("none"),
+                                 leveldbDir: root.appendingPathComponent("none"), defaults: defaults)
+        store.now = { clock }
+        session(sessions, pid: me, id: "t", host: nil, name: "Terminal", status: "busy")
+        store.poll()
+        expect(store.busy.count == 1, "busy terminal session")
+        session(sessions, pid: me, id: "t", host: nil, name: "Terminal", status: "idle")
+        clock += 1; store.poll()
+        expect(store.done.isEmpty, "not done during the debounce")
+        clock += 1; session(sessions, pid: me, id: "t", host: nil, name: "Terminal", status: "busy"); store.poll()
+        clock += 1; session(sessions, pid: me, id: "t", host: nil, name: "Terminal", status: "idle"); store.poll()
+        clock += 2; store.poll()
+        expect(store.done.isEmpty, "a flicker restarts the debounce")
+        clock += 2; store.poll()
+        expect(store.done.map(\.id) == ["t"], "done after the debounce")
+        clock += SessionStore.doneExpiry + 1; store.poll()
+        expect(store.done.isEmpty, "expires after 30 minutes")
+        let fresh = SessionStore(sessionsDir: sessions, desktopDir: root.appendingPathComponent("none"),
+                                 leveldbDir: root.appendingPathComponent("none"), defaults: defaults)
+        fresh.poll()
+        expect(fresh.done.isEmpty && fresh.idleCount == 1, "an idle session at startup isn't done")
+    }
+
+    static func testSpriteSheet(_ root: URL) {
+        let w = 8 * 192, h = 9 * 208
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return expect(false, "context") }
+        ctx.setFillColor(CGColor(red: 1, green: 0, blue: 0, alpha: 1))
+        func fill(row: Int, cols: Int) {
+            for c in 0..<cols {   // CGContext's origin is bottom-left; sheet rows count from the top
+                ctx.fill(CGRect(x: c * 192 + 40, y: h - (row + 1) * 208 + 40, width: 100, height: 100))
+            }
+        }
+        fill(row: 0, cols: 3)
+        fill(row: 7, cols: 2)
+        let url = root.appendingPathComponent("sheet.png")
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        guard let img = ctx.makeImage(),
+              let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil) else {
+            return expect(false, "write png")
+        }
+        CGImageDestinationAddImage(dest, img, nil)
+        CGImageDestinationFinalize(dest)
+        guard let sheet = SpriteSheet(url: url) else { return expect(false, "loads the sheet") }
+        expect(sheet.frames(for: .idle).count == 3, "idle row has 3 frames")
+        expect(sheet.frames(for: .running).count == 2, "running row has 2 frames")
+        expect(sheet.frames(for: .waiting).count == 3, "an empty row falls back to idle")
+        expect(SpriteSheet(url: root.appendingPathComponent("nope.png")) == nil, "a missing file fails cleanly")
+    }
+}
+
 @main
 enum ClaudePetMain {
     static func main() {
@@ -1063,6 +1607,18 @@ enum ClaudePetMain {
         if let i = args.firstIndex(of: "--render-icon"), i + 1 < args.count {
             IconRenderer.writeIconset(to: args[i + 1])
             return
+        }
+        if args.contains("--self-test") { exit(SelfTest.run()) }
+        if args.contains("--dump") {
+            // Prints what the pet sees right now, for debugging.
+            let store = SessionStore()
+            store.poll()
+            print("app unread list:", store.unread.ids.map { "\($0.count) chats" } ?? "not found (using timestamps)")
+            for (label, list) in [("needs you", store.waiting), ("working", store.busy), ("done", store.done)] {
+                for s in list { print("\(label): \(s.name)\(s.pid == 0 ? " (no process)" : "")") }
+            }
+            print("idle:", store.idleCount)
+            exit(0)
         }
         let app = NSApplication.shared
         let delegate = AppDelegate()
