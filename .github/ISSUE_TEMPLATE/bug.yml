@@ -1,0 +1,24 @@
+name: Bug report
+description: Something isn't working
+labels: [bug]
+body:
+  - type: textarea
+    attributes:
+      label: What happened?
+      description: What did you expect, and what did the pet do instead? Screenshots help.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Steps to reproduce
+  - type: input
+    attributes:
+      label: Versions
+      description: Claude Pet version (right-click the app → Get Info), macOS version, and Claude Code version (`claude --version`).
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Output of `--dump` (optional)
+      description: "`/Applications/ClaudePet.app/Contents/MacOS/ClaudePet --dump`. Remove any chat titles you don't want to share."
+      render: text

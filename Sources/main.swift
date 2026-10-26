@@ -241,6 +241,9 @@ final class SessionStore: ObservableObject {
     @Published var sessions: [SessionInfo] = []
     /// id -> when it finished, for every session shown as done.
     @Published var finished: [String: Date] = [:]
+    /// Sessions that just went idle and are inside the "done" debounce: still shown as working,
+    /// so a card doesn't vanish and come back.
+    @Published private(set) var settling: Set<String> = []
 
     let sessionsDir: URL
     let desktop: DesktopChats
@@ -416,15 +419,21 @@ final class SessionStore: ObservableObject {
         }
         if result != sessions { sessions = result }
         if newFinished != finished { finished = newFinished }
+        let newSettling = Set(idleSince.keys)
+        if newSettling != settling { settling = newSettling }
     }
 
     var waiting: [SessionInfo] { sessions.filter { $0.state == .waiting } }
-    var busy: [SessionInfo] { sessions.filter { $0.state == .busy } }
+    var busy: [SessionInfo] {
+        sessions.filter { $0.state == .busy || ($0.state == .idle && settling.contains($0.id) && finished[$0.id] == nil) }
+    }
     var done: [SessionInfo] {
         sessions.filter { $0.state == .idle && finished[$0.id] != nil }
             .sorted { (finished[$0.id] ?? .distantPast) > (finished[$1.id] ?? .distantPast) }
     }
-    var idleCount: Int { sessions.filter { $0.state == .idle && finished[$0.id] == nil && $0.pid != 0 }.count }
+    var idleCount: Int {
+        sessions.filter { $0.state == .idle && finished[$0.id] == nil && !settling.contains($0.id) && $0.pid != 0 }.count
+    }
 }
 
 // MARK: - Built-in pixel pets
@@ -987,7 +996,7 @@ struct SessionStack: View {
         out += store.done.map { Item(session: $0, kind: .done, detail: "Finished",
                                      time: ago(store.finished[$0.id] ?? $0.statusUpdatedAt)) }
         if showIdle {
-            out += store.sessions.filter { $0.state == .idle && store.finished[$0.id] == nil }
+            out += store.sessions.filter { $0.state == .idle && store.finished[$0.id] == nil && !store.settling.contains($0.id) }
                 .map { Item(session: $0, kind: .idle, detail: "Idle", time: ago($0.statusUpdatedAt)) }
         }
         return out
@@ -1691,6 +1700,7 @@ enum SelfTest {
         session(sessions, pid: me, id: "t", host: nil, name: "Terminal", status: "idle")
         clock += 1; store.poll()
         expect(store.done.isEmpty, "not done during the debounce")
+        expect(store.busy.map(\.id) == ["t"], "still listed as working during the debounce")
         clock += 1; session(sessions, pid: me, id: "t", host: nil, name: "Terminal", status: "busy"); store.poll()
         clock += 1; session(sessions, pid: me, id: "t", host: nil, name: "Terminal", status: "idle"); store.poll()
         clock += 2; store.poll()

@@ -1,0 +1,25 @@
+name: Share a pet
+description: Made a pet? Show it off, and it may join the gallery
+labels: [pet]
+body:
+  - type: input
+    attributes:
+      label: Pet name
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Preview
+      description: Drag in a GIF or screenshot of your pet in Claude Pet.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Sprite sheet
+      description: Attach the sprite sheet (a zipped pet folder works too). See docs/PETS.md for the format.
+  - type: checkboxes
+    attributes:
+      label: Rights
+      options:
+        - label: I made this pet (or have the right to share it), and it's OK to include it in the repo under the MIT license.
+          required: true

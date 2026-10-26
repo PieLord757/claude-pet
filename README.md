@@ -1,40 +1,44 @@
-<p align="center"><img src="docs/icon.png" width="128" alt="Claude Pet icon"></p>
+<p align="center"><img src="docs/icon.png" width="120" alt="Claude Pet icon"></p>
 
-# Claude Pet
+<h1 align="center">Claude Pet</h1>
 
-A small floating pet for macOS that keeps an eye on your [Claude Code](https://claude.com/claude-code) sessions, so you can work in other apps and still see at a glance what's happening.
+<p align="center">
+  <b>A tiny pixel pet that floats on your Mac and tells you which Claude Code chats are working, need you, or just finished.</b><br>
+  So you can work in other apps without checking back every two minutes.
+</p>
 
-<p align="center"><img src="docs/screenshot.png" width="300" alt="Claude Pet showing two working sessions and one finished session"></p>
+<p align="center">
+  <a href="../../releases/latest"><img alt="Download" src="https://img.shields.io/github/v/release/PieLord757/claude-pet?label=download&color=d97757"></a>
+  <img alt="macOS 14+" src="https://img.shields.io/badge/macOS-14%2B-555">
+  <a href="../../actions/workflows/build.yml"><img alt="Build" src="https://github.com/PieLord757/claude-pet/actions/workflows/build.yml/badge.svg"></a>
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-blue"></a>
+</p>
 
-It floats above every app and desktop and shows:
+<p align="center"><img src="docs/demo.gif" width="420" alt="Claude Pet: three sessions start working, one needs approval, one finishes and the pet cheers"></p>
 
-- 🟠 **Needs you**: a session is blocked on a permission prompt or a question
-- 🔵 **Working**: Claude is busy in that session
-- 🟢 **Done**: a chat finished and you haven't read it yet. It matches the Claude sidebar's blue dots; click the card to open the chat, and it clears once you've read it.
+## Why
 
-The pet reacts too: it sleeps when nothing is running, gets busy while Claude works, and jumps when something finishes.
+Claude Code is great at long tasks, which means a lot of waiting and a lot of checking: is it done? Is it stuck on a permission prompt? Which of my five chats finished?
 
-It works with sessions in the Claude desktop app's Code tab and with `claude` in a terminal.
+Claude Pet sits on top of whatever you're doing and answers that at a glance:
 
-> Unofficial fan project. Not affiliated with or endorsed by Anthropic.
+- 🟠 **Needs you**: a chat is waiting on a permission prompt or a question
+- 🔵 **Working**: Claude is busy
+- 🟢 **Done**: a chat finished and you haven't read it yet (it matches the blue dots in Claude's sidebar)
+
+Click a card to jump straight into that chat. The pet reacts too: it naps when nothing is running, puts on goggles while Claude works, and jumps when something finishes.
 
 ## Install
 
-### Option 1: download the release
+1. Download **[ClaudePet.zip](../../releases/latest)**, unzip it, and move `ClaudePet.app` to Applications.
+2. It isn't notarized yet, so the first time, right-click the app → **Open** → **Open** (or run `xattr -dr com.apple.quarantine /Applications/ClaudePet.app`).
 
-1. Download `ClaudePet.zip` from the [latest release](../../releases/latest) and unzip it.
-2. Move `ClaudePet.app` to `/Applications`.
-3. The app is not notarized, so macOS blocks the first launch. Right-click the app → **Open** → **Open**, or run:
+That's it. It works with the Claude desktop app's Code tab and with `claude` in a terminal. Apple Silicon, macOS 14 or newer.
 
-   ```bash
-   xattr -dr com.apple.quarantine /Applications/ClaudePet.app
-   ```
+<details>
+<summary><b>Build from source</b> (one command, no Xcode project, no dependencies)</summary>
 
-The release build is for Apple Silicon Macs. On Intel, build it yourself (below).
-
-### Option 2: build it yourself
-
-Requirements: macOS 14 (Sonoma) or newer, and Xcode **or** just the Command Line Tools (`xcode-select --install`).
+You need Xcode or just the Command Line Tools (`xcode-select --install`).
 
 ```bash
 git clone https://github.com/PieLord757/claude-pet.git
@@ -43,7 +47,16 @@ cd claude-pet
 open ClaudePet.app
 ```
 
-`build.sh` compiles the single Swift file `Sources/main.swift` with `swiftc`, draws the app icon, and wraps everything in an app bundle. There's no Xcode project and there are no dependencies. If your default SDK is newer than your compiler (common after a Command Line Tools update), the script falls back to an older installed SDK that works.
+`build.sh` compiles `Sources/main.swift`, runs the self-tests, draws the app icon, and wraps everything in an app bundle. If your default SDK is newer than your compiler (common after a Command Line Tools update), it falls back to an older installed SDK that works. This also gives you an Intel build.
+</details>
+
+## Pets
+
+<p align="center"><img src="docs/pets.png" width="560" alt="The built-in pets: Sprout, Mochi and Bolt"></p>
+
+Right-click the pet → **Pet** to switch between Sprout, Mochi and Bolt, or **Import Pet…** to bring your own. Claude Pet reads the same sprite format as Codex pets, and any pets you already have in `~/.codex/pets` show up automatically.
+
+**Made a pet?** See [docs/PETS.md](docs/PETS.md) for the format, then [share it](../../issues/new?template=new-pet.yml) so it can join the gallery.
 
 ## Using it
 
@@ -52,119 +65,30 @@ open ClaudePet.app
 | Click the pet, or the `⌄` in the pill | Show or hide the session cards |
 | Drag the pet | Move it (the position is remembered) |
 | ✎ in the pill | Start a new Claude Code session |
-| Click a card | Open that chat in the Claude desktop app (for a terminal session, bring its terminal forward) |
-| Right-click the pet | Choose a pet, import a pet, change size, show idle sessions, clear finished, reset position, **Close Pet** |
+| Click a card | Open that chat in Claude (a terminal session brings its terminal forward) |
+| Right-click the pet | Pets, size, idle sessions, clear finished, reset position, **Close Pet** |
 
-Cards open chats with the desktop app's own link, `claude://code/continue?session=<chat id>`. Opening a chat marks it read in Claude, so its **Done** card then goes away by itself.
+- **Open it:** `⌘ Space` → **ClaudePet**. **Start at login:** System Settings → General → Login Items → **+**.
+- **`/pet` in Claude Code (optional):** `mkdir -p ~/.claude/commands && cp extras/pet.md ~/.claude/commands/pet.md`, then `/pet` opens it and `/pet close` closes it.
 
-### Opening and closing
+## Privacy
 
-- **Open:** press `⌘ Space` and type **ClaudePet**, or open it from Applications.
-- **Close:** right-click the pet → **Close Pet**.
-- **Start at login:** System Settings → General → Login Items → **+** → `ClaudePet.app`.
+Everything stays on your Mac. The pet makes **no network requests**. It only reads Claude Code's local session status files and the desktop app's local chat list, and it writes only its own preferences and the pets you import. Details in [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md).
 
-### `/pet` inside Claude Code (optional)
+## FAQ
 
-A slash command that opens or closes the pet from any Claude Code chat:
+**Does it work without the desktop app?** Yes. Terminal `claude` sessions show up too; their Done cards clear after 30 minutes or with right-click → Clear Finished.
 
-```bash
-mkdir -p ~/.claude/commands && cp extras/pet.md ~/.claude/commands/pet.md
-```
+**Will a Claude update break it?** Possibly. It reads internal files that aren't a documented API. The parsing is small and covered by tests, so it's quick to fix. [Open an issue](../../issues/new?template=bug.yml) if it stops matching your sidebar.
 
-Then `/pet` opens it and `/pet close` closes it. The Claude desktop app's own menus can't be extended by other apps, so this is the closest thing to a built-in button.
+**Does it steal focus?** No. The pet never takes keyboard focus, so you can keep typing in whatever app you're in.
 
-## Pets
+## Contributing
 
-Right-click the pet → **Pet** to switch. You get:
+Bug reports, pets, and pull requests are all welcome. [CONTRIBUTING.md](CONTRIBUTING.md) explains the one-file layout and the tests, and [good first issues](../../issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) are a nice place to start.
 
-- **Built in:** Sprout (the default), Mochi, and Bolt. These are drawn in code.
-- **Your Codex pets:** any pet in `~/.codex/pets/` (or `$CODEX_HOME/pets/`) shows up automatically with "(Codex)" after its name. Claude Pet uses the same format as Codex pets.
-- **Imported pets:** right-click → **Import Pet…** and choose either a Codex pet folder (`pet.json` + sprite sheet) or a bare sprite sheet image. Imports are copied to `~/Library/Application Support/ClaudePet/pets/`. **Open Pets Folder** takes you there.
+If Claude Pet saves you a few tab switches, a ⭐ helps other people find it.
 
-### Sprite sheet format (Codex-compatible)
+---
 
-- A PNG or WebP atlas, **8 columns × 9 rows** of **192×208** cells (1536×1872 total), transparent background.
-- Each row is one animation. Empty cells at the end of a row are skipped:
-
-| Row | Animation | Claude Pet plays it when |
-| --- | --- | --- |
-| 0 | idle | nothing needs attention (slowed down when everything is quiet) |
-| 1 | running right | you drag the pet to the right |
-| 2 | running left | you drag the pet to the left |
-| 3 | waving | (not used yet) |
-| 4 | jumping | a session just finished |
-| 5 | failed | (not used yet) |
-| 6 | waiting | a session needs you |
-| 7 | running | Claude is working |
-| 8 | review | (not used yet) |
-
-Any row that's empty falls back to idle, so a sheet with just an idle row still works.
-
-A pet folder looks like this:
-
-```text
-my-pet/
-├── pet.json
-└── spritesheet.webp
-```
-
-```json
-{
-  "id": "my-pet",
-  "displayName": "My Pet",
-  "description": "One short sentence.",
-  "spritesheetPath": "spritesheet.webp"
-}
-```
-
-## How it works
-
-Every running Claude Code session writes a small status file to `~/.claude/sessions/<pid>.json` with its name and a `status` of `busy`, `waiting` or `idle` (plus a `waitingFor` reason when blocked). Claude Pet polls that folder once a second:
-
-- Only `*.json` files are read there. Nothing else in `~/.claude` is touched.
-- A session counts only while its process is alive (`kill(pid, 0)`).
-- A busy → idle change shows as **Done** after a 3 second debounce, and expires after 30 minutes.
-- For chats in the Claude desktop app, **Done** mirrors the app's own unread list (the sidebar's blue dots), so a card clears as soon as you read that chat in Claude, and unread chats show up even if their process has stopped or the pet was just started. The pet reads that list from the app's local storage log (`~/Library/Application Support/Claude/Local Storage/leveldb/*.log`, key `epitaxy-unread-v1`) and chat titles and times from `~/Library/Application Support/Claude/claude-code-sessions/`. If the list isn't available it falls back to comparing each chat's last turn with when you last opened it. Terminal sessions have no desktop chat, so they're done when the pet sees them finish, and clear after 30 minutes or with right-click → Clear Finished.
-- The app makes no network requests. It writes only its own preferences (`defaults read local.claudepet`) and the pets you import.
-
-⚠️ These files are internal details of Claude Code and the desktop app, not documented APIs. A future update could change them and break the pet. If that happens, the parsing lives in `SessionStore`, `DesktopChats` and `DesktopUnread`.
-
-## Hacking on it
-
-Everything is in [`Sources/main.swift`](Sources/main.swift):
-
-- **`SessionStore`** reads the session files and decides waiting/working/done. **`DesktopChats`** and **`DesktopUnread`** read the desktop app's chat files and unread list; **`LevelDBLog`** is a small reader for LevelDB write-ahead logs.
-- **`BuiltinPet` / `PixelPet` / `PetCanvas`** are the built-in pixel pets. Each row is a 16-character string and each character is a palette color (`K` outline, `O` body, `W` hair, `.` transparent). Add a `BuiltinPet` with its own top rows and colors, then list it in `BuiltinPet.all`.
-- **`SpriteSheet` / `PetLibrary` / `PetFigure`** load, import and animate Codex-format pets.
-- **`PetView` / `ControlPill` / `SessionStack` / `SessionToast`** are the SwiftUI interface.
-- **`AppDelegate`** creates the always-on-top, all-desktops panel and sizes it to its content.
-- **`IconRenderer`** draws the app icon from the Sprout sprite (`ClaudePet --render-icon <dir>`).
-
-### Tests and debugging
-
-- `./build.sh` runs the self-tests after compiling (`ClaudePet --self-test`). They check the unread logic, the LevelDB log reader, terminal-session timing, and sprite sheets against temporary folders, and the build fails if any check fails.
-- `ClaudePet.app/Contents/MacOS/ClaudePet --dump` prints what the pet sees right now (needs you / working / done), which is handy when the pet disagrees with the sidebar.
-
-### Testing without real sessions
-
-Point the pet at a fake folder with `CLAUDE_PET_SESSIONS_DIR`. The `pid` must be a live process, so a `sleep` works:
-
-```bash
-mkdir -p /tmp/fake-sessions
-sleep 600 &
-echo "{\"pid\":$!,\"sessionId\":\"demo\",\"name\":\"Demo session\",\"status\":\"busy\"}" > /tmp/fake-sessions/$!.json
-open --env CLAUDE_PET_SESSIONS_DIR=/tmp/fake-sessions ClaudePet.app
-```
-
-Change `"busy"` to `"waiting"` (add `"waitingFor":"approve Bash"`) or to `"idle"` to see the other states. Only one Claude Pet runs at a time, so close the real one first.
-
-## Ideas for forks
-
-- Use the waving, failed and review rows (for example, failed when a session errors)
-- A sound or a macOS notification when something needs you
-- Per-session deep links, once the desktop app supports them
-- A menu bar mode
-
-## License
-
-[MIT](LICENSE)
+<sub>Unofficial fan project. Not affiliated with or endorsed by Anthropic. "Claude" is a trademark of Anthropic.</sub>
