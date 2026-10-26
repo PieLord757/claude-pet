@@ -4,7 +4,9 @@
 // working, waiting on you, or just finished.
 
 import AppKit
+import ImageIO
 import SwiftUI
+import UniformTypeIdentifiers
 
 // MARK: - Session model
 
@@ -135,11 +137,54 @@ final class SessionStore: ObservableObject {
     var idleCount: Int { sessions.filter { $0.state == .idle && finished[$0.id] == nil }.count }
 }
 
-// MARK: - Pixel pet
+// MARK: - Built-in pixel pets
 
 enum PetMood { case sleepy, idle, working, waiting, cheering }
 
-/// An original 16x16 critter: an orange blob with wild white scientist hair.
+/// A built-in pet: the shared 16x16 body with its own top rows (hair, ears, antenna) and colors.
+struct BuiltinPet {
+    let id: String
+    let name: String
+    let top: [String]                 // the 4 rows above the head
+    let colors: [Character: Color]    // overrides of PixelPet.palette
+
+    static let sprout = BuiltinPet(id: "builtin:sprout", name: "Sprout", top: [
+        "..K...K...K.....",
+        ".KWK.KWK.KWK.K..",
+        "KWWWKWWWKWWWKWK.",
+        ".KWwWWWwWWWwWWK.",
+    ], colors: [:])
+
+    static let mochi = BuiltinPet(id: "builtin:mochi", name: "Mochi", top: [
+        "................",
+        "..K..........K..",
+        "..KK........KK..",
+        "..KRK......KRK..",
+    ], colors: [
+        "O": Color(red: 0.97, green: 0.89, blue: 0.82),
+        "o": Color(red: 0.86, green: 0.73, blue: 0.66),
+        "R": Color(red: 0.96, green: 0.62, blue: 0.70),
+        "M": Color(red: 0.55, green: 0.25, blue: 0.30),
+    ])
+
+    static let bolt = BuiltinPet(id: "builtin:bolt", name: "Bolt", top: [
+        ".......YY.......",
+        ".......KK.......",
+        ".......KK.......",
+        "....KKKKKKKK....",
+    ], colors: [
+        "O": Color(red: 0.42, green: 0.74, blue: 0.72),
+        "o": Color(red: 0.27, green: 0.53, blue: 0.53),
+        "R": Color(red: 1.00, green: 0.84, blue: 0.30),
+        "M": Color(red: 0.13, green: 0.25, blue: 0.27),
+    ])
+
+    static let all = [sprout, mochi, bolt]
+
+    func color(_ ch: Character) -> Color? { colors[ch] ?? PixelPet.palette[ch] }
+}
+
+/// The shared 16x16 body. Each row is 16 characters; each character is a palette color.
 struct PixelPet {
     static let palette: [Character: Color] = [
         "K": Color(red: 0.16, green: 0.13, blue: 0.12),   // outline
@@ -156,13 +201,7 @@ struct PixelPet {
         "Y": Color(red: 1.00, green: 0.84, blue: 0.30),   // spark
     ]
 
-    static let hair = [
-        "..K...K...K.....",
-        ".KWK.KWK.KWK.K..",
-        "KWWWKWWWKWWWKWK.",
-        ".KWwWWWwWWWwWWK.",
-    ]
-    static let top =    "..KKKKKKKKKKKK.."
+    static let head =   "..KKKKKKKKKKKK.."
     static let blank =  ".KOOOOOOOOOOOOK."
     static let bottom = [
         ".KoOOOOOOOOOOoK.",
@@ -196,8 +235,8 @@ struct PixelPet {
         }
     }
 
-    static func grid(_ mood: PetMood, frame: Int, blink: Bool, look: Int) -> [String] {
-        var rows = hair + [top] + eyes(mood, blink: blink, look: look) + mouth(mood, frame: frame) + [blank] + bottom
+    static func grid(_ mood: PetMood, frame: Int, blink: Bool, look: Int, pet: BuiltinPet = .sprout) -> [String] {
+        var rows = pet.top + [head] + eyes(mood, blink: blink, look: look) + mouth(mood, frame: frame) + [blank] + bottom
         if mood == .cheering && frame % 2 == 0 {
             // arms up
             rows[8] = "K" + rows[8].dropFirst().dropLast() + "K"
@@ -208,14 +247,15 @@ struct PixelPet {
 }
 
 struct PetCanvas: View {
+    let pet: BuiltinPet
     let mood: PetMood
     let frame: Int
-    let pixel: CGFloat = 6
+    let pixel: CGFloat
 
     var body: some View {
         let blink = mood != .working && frame % 17 == 0
         let look = mood == .idle ? [0, 0, 0, -1, 0, 0, 1, 0][(frame / 6) % 8] : 0
-        let rows = PixelPet.grid(mood, frame: frame, blink: blink, look: look)
+        let rows = PixelPet.grid(mood, frame: frame, blink: blink, look: look, pet: pet)
         let bob: CGFloat = {
             switch mood {
             case .working: return frame % 2 == 0 ? 0 : -pixel
@@ -228,7 +268,7 @@ struct PetCanvas: View {
         Canvas { ctx, _ in
             for (y, row) in rows.enumerated() {
                 for (x, ch) in row.enumerated() {
-                    guard let c = PixelPet.palette[ch] else { continue }
+                    guard let c = pet.color(ch) else { continue }
                     ctx.fill(Path(CGRect(x: CGFloat(x) * pixel, y: CGFloat(y) * pixel + pixel * 3 + bob,
                                          width: pixel, height: pixel)), with: .color(c))
                 }
@@ -244,31 +284,276 @@ struct PetCanvas: View {
             }
         }
         .frame(width: 16 * pixel, height: 20 * pixel)
-        .overlay(alignment: .topTrailing) {
-            if mood == .sleepy {
-                Text(frame % 6 < 3 ? "z" : "Z")
-                    .font(.system(size: 13, weight: .heavy, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .offset(x: 6, y: CGFloat(-(frame % 6)))
-            } else if mood == .waiting {
-                Text("!")
-                    .font(.system(size: 18, weight: .black, design: .rounded))
-                    .foregroundStyle(Color.orange)
-                    .offset(x: 6, y: frame % 2 == 0 ? -2 : 0)
+        .overlay(alignment: .topTrailing) { if mood == .sleepy { Zzz(frame: frame) } }
+    }
+}
+
+struct Zzz: View {
+    let frame: Int
+    var body: some View {
+        Text(frame % 6 < 3 ? "z" : "Z")
+            .font(.system(size: 13, weight: .heavy, design: .monospaced))
+            .foregroundStyle(.secondary)
+            .offset(x: 6, y: CGFloat(-(frame % 6)))
+    }
+}
+
+// MARK: - Sprite-sheet pets (Codex format)
+
+/// A Codex-compatible pet: an 8-column atlas of 192x208 cells, one animation per row
+/// (idle, run right, run left, wave, jump, failed, waiting, running, review).
+final class SpriteSheet {
+    let frames: [[CGImage]]       // the non-empty cells of each row
+    let cellSize: CGSize
+
+    static let columns = 8
+    enum Row: Int { case idle = 0, runRight, runLeft, wave, jump, failed, waiting, running, review }
+
+    init?(url: URL) {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let img = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return nil }
+        let cw = img.width / Self.columns
+        guard cw > 0 else { return nil }
+        let ch = Int((Double(cw) * 208 / 192).rounded())
+        let rows = img.height / ch
+        guard rows >= 1 else { return nil }
+        var all: [[CGImage]] = []
+        for r in 0..<rows {
+            var row: [CGImage] = []
+            for c in 0..<Self.columns {
+                if let cell = img.cropping(to: CGRect(x: c * cw, y: r * ch, width: cw, height: ch)),
+                   !Self.isEmpty(cell) {
+                    row.append(cell)
+                }
             }
+            all.append(row)
+        }
+        guard let first = all.first, !first.isEmpty else { return nil }
+        frames = all
+        cellSize = CGSize(width: cw, height: ch)
+    }
+
+    /// The frames of an animation row, falling back to idle when the sheet leaves it empty.
+    func frames(for row: Row) -> [CGImage] {
+        let r = row.rawValue
+        return r < frames.count && !frames[r].isEmpty ? frames[r] : frames[0]
+    }
+
+    private static func isEmpty(_ img: CGImage) -> Bool {
+        let n = 24
+        var px = [UInt8](repeating: 0, count: n * n * 4)
+        let drawn: Bool = px.withUnsafeMutableBytes { buf in
+            guard let ctx = CGContext(data: buf.baseAddress, width: n, height: n, bitsPerComponent: 8, bytesPerRow: n * 4,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            ctx.draw(img, in: CGRect(x: 0, y: 0, width: n, height: n))
+            return true
+        }
+        return drawn && !stride(from: 3, to: px.count, by: 4).contains { px[$0] > 8 }
+    }
+}
+
+// MARK: - Pet library
+
+struct PetManifest: Decodable {
+    let id: String?
+    let displayName: String?
+    let spritesheetPath: String?
+}
+
+struct PetEntry: Identifiable {
+    enum Kind { case builtin(BuiltinPet), sprite(SpriteSheet) }
+    let id: String
+    let name: String
+    let kind: Kind
+}
+
+struct ImportError: Error {
+    let message: String
+    init(_ message: String) { self.message = message }
+}
+
+/// Built-in pets, pets imported into Claude Pet, and any Codex pets on this Mac.
+final class PetLibrary: ObservableObject {
+    @Published private(set) var pets: [PetEntry] = []
+    @Published var selectedId: String {
+        didSet { UserDefaults.standard.set(selectedId, forKey: "pet") }
+    }
+
+    static let importDir = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Application Support/ClaudePet/pets")
+    static var codexDir: URL {
+        let home = ProcessInfo.processInfo.environment["CODEX_HOME"].map { URL(fileURLWithPath: $0) }
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex")
+        return home.appendingPathComponent("pets")
+    }
+
+    init() {
+        selectedId = UserDefaults.standard.string(forKey: "pet") ?? BuiltinPet.sprout.id
+        reload()
+    }
+
+    var selected: PetEntry { pets.first { $0.id == selectedId } ?? pets[0] }
+
+    func reload() {
+        var list = BuiltinPet.all.map { PetEntry(id: $0.id, name: $0.name, kind: .builtin($0)) }
+        list += Self.scan(Self.importDir, prefix: "local", suffix: "")
+        list += Self.scan(Self.codexDir, prefix: "codex", suffix: " (Codex)")
+        pets = list
+    }
+
+    private static func scan(_ dir: URL, prefix: String, suffix: String) -> [PetEntry] {
+        let subs = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+        return subs.sorted { $0.lastPathComponent < $1.lastPathComponent }.compactMap { folder in
+            guard let data = try? Data(contentsOf: folder.appendingPathComponent("pet.json")),
+                  let m = try? JSONDecoder().decode(PetManifest.self, from: data),
+                  let sheet = SpriteSheet(url: folder.appendingPathComponent(m.spritesheetPath ?? "spritesheet.webp"))
+            else { return nil }
+            let name = m.displayName ?? m.id ?? folder.lastPathComponent
+            return PetEntry(id: "\(prefix):\(folder.lastPathComponent)", name: name + suffix, kind: .sprite(sheet))
+        }
+    }
+
+    /// Asks for a pet folder (pet.json + sprite sheet) or a bare sprite sheet image,
+    /// copies it into Claude Pet's pets folder, and selects it.
+    func importPet() {
+        let panel = NSOpenPanel()
+        panel.title = "Import a Pet"
+        panel.message = "Choose a Codex pet folder (pet.json + spritesheet) or a sprite sheet image: 8 columns of 192×208 frames."
+        panel.prompt = "Import"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.folder, .png, .webP]
+        NSApp.activate()
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        let fm = FileManager.default
+        var dest: URL?
+        do {
+            try fm.createDirectory(at: Self.importDir, withIntermediateDirectories: true)
+            let base = url.deletingPathExtension().lastPathComponent
+            var target = Self.importDir.appendingPathComponent(base)
+            var n = 2
+            while fm.fileExists(atPath: target.path) {
+                target = Self.importDir.appendingPathComponent("\(base)-\(n)"); n += 1
+            }
+            dest = target
+            if url.hasDirectoryPath {
+                guard fm.fileExists(atPath: url.appendingPathComponent("pet.json").path) else {
+                    throw ImportError("That folder has no pet.json. Choose a Codex pet folder or a sprite sheet image.")
+                }
+                try fm.copyItem(at: url, to: target)
+            } else {
+                guard SpriteSheet(url: url) != nil else {
+                    throw ImportError("That image isn't a sprite sheet Claude Pet can read.")
+                }
+                try fm.createDirectory(at: target, withIntermediateDirectories: true)
+                let sheetName = "spritesheet." + url.pathExtension.lowercased()
+                try fm.copyItem(at: url, to: target.appendingPathComponent(sheetName))
+                let manifest = ["id": target.lastPathComponent, "displayName": base,
+                                "description": "Imported into Claude Pet.", "spritesheetPath": sheetName]
+                try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+                    .write(to: target.appendingPathComponent("pet.json"))
+            }
+            reload()
+            let newId = "local:\(target.lastPathComponent)"
+            guard pets.contains(where: { $0.id == newId }) else {
+                throw ImportError("Claude Pet couldn't read the sprite sheet in that pet.")
+            }
+            selectedId = newId
+        } catch {
+            if let dest { try? fm.removeItem(at: dest) }
+            let alert = NSAlert()
+            alert.messageText = "Couldn't import that pet"
+            alert.informativeText = (error as? ImportError)?.message ?? error.localizedDescription
+            alert.runModal()
+        }
+    }
+
+    func openFolder() {
+        try? FileManager.default.createDirectory(at: Self.importDir, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(Self.importDir)
+    }
+}
+
+/// Draws whichever pet is selected in the given mood.
+struct PetFigure: View {
+    let pet: PetEntry
+    let mood: PetMood
+    let frame: Int        // ticks at 8 per second
+    let dragDir: Int      // -1 dragging left, 1 right, 0 not dragging
+    let scale: CGFloat
+
+    var body: some View {
+        switch pet.kind {
+        case .builtin(let b):
+            PetCanvas(pet: b, mood: mood, frame: frame / 2, pixel: (5 * scale).rounded())
+        case .sprite(let sheet):
+            let row: SpriteSheet.Row = dragDir > 0 ? .runRight : dragDir < 0 ? .runLeft : {
+                switch mood {
+                case .working: return .running
+                case .waiting: return .waiting
+                case .cheering: return .jump
+                case .idle, .sleepy: return .idle
+                }
+            }()
+            let frames = sheet.frames(for: row)
+            let slow = row == .idle ? (mood == .sleepy ? 4 : 2) : 1
+            let h = 104 * scale
+            Image(decorative: frames[(frame / slow) % frames.count], scale: 1)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: h * sheet.cellSize.width / sheet.cellSize.height, height: h)
+                .overlay(alignment: .topTrailing) { if mood == .sleepy { Zzz(frame: frame / 2) } }
         }
     }
 }
 
 // MARK: - Views
 
+enum Theme {
+    static let clay = Color(red: 0.85, green: 0.47, blue: 0.34)          // the pet's orange
+    static let card = Color(nsColor: .windowBackgroundColor)
+    static let waiting = Color(red: 0.95, green: 0.55, blue: 0.15)
+    static let working = Color(red: 0.30, green: 0.55, blue: 0.95)
+    static let done = Color(red: 0.25, green: 0.70, blue: 0.40)
+}
+
+/// Solid (not vibrant) surface: a non-activating panel is never key, and
+/// materials render washed out in that state.
+struct CardBackground: ViewModifier {
+    var radius: CGFloat
+    func body(content: Content) -> some View {
+        content
+            .background(Theme.card, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous).strokeBorder(Color.primary.opacity(0.08)))
+            .shadow(color: .black.opacity(0.14), radius: 6, y: 3)
+    }
+}
+
+extension View {
+    func card(radius: CGFloat = 16) -> some View { modifier(CardBackground(radius: radius)) }
+}
+
+func ago(_ d: Date) -> String {
+    let s = max(0, Int(Date().timeIntervalSince(d)))
+    if s < 60 { return "\(s)s" }
+    if s < 3600 { return "\(s / 60)m" }
+    return "\(s / 3600)h"
+}
+
 struct PetView: View {
     @ObservedObject var store: SessionStore
+    @ObservedObject var library: PetLibrary
     @AppStorage("expanded") private var expanded = true
+    @AppStorage("showIdle") private var showIdle = false
+    @AppStorage("petScale") private var petScale = 1.0
     @State private var frame = 0
     @State private var cheerUntil: Date = .distantPast
     @State private var lastDoneCount = 0
-    let tick = Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()
+    @State private var dragDir = 0
+    let tick = Timer.publish(every: 0.125, on: .main, in: .common).autoconnect()
 
     var mood: PetMood {
         if !store.waiting.isEmpty { return .waiting }
@@ -278,43 +563,43 @@ struct PetView: View {
         return .sleepy
     }
 
-    var badge: (Int, Color)? {
-        if !store.waiting.isEmpty { return (store.waiting.count, .orange) }
-        if !store.done.isEmpty { return (store.done.count, .green) }
-        if !store.busy.isEmpty { return (store.busy.count, .blue) }
-        return nil
-    }
-
     var body: some View {
-        VStack(alignment: .center, spacing: 6) {
-            PetCanvas(mood: mood, frame: frame)
-                .overlay(alignment: .topLeading) {
-                    if let (n, c) = badge {
-                        Text("\(n)")
-                            .font(.system(size: 11, weight: .bold, design: .rounded))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 6).padding(.vertical, 2)
-                            .background(Capsule().fill(c))
-                            .offset(x: -6, y: 8)
-                    }
-                }
+        VStack(spacing: 6) {
+            PetFigure(pet: library.selected, mood: mood, frame: frame, dragDir: dragDir, scale: petScale)
                 .contentShape(Rectangle())
-                .gesture(WindowDragGesture())
+                .gesture(WindowDragGesture(direction: $dragDir))
                 .onTapGesture { withAnimation(.snappy) { expanded.toggle() } }
-                .help(expanded ? "Click to hide sessions · drag to move" : "Click to show sessions · drag to move")
+                .help("Click to show or hide sessions · drag to move · right-click for options")
+
+            ControlPill(store: store, expanded: $expanded)
 
             if expanded {
-                SessionCard(store: store) { withAnimation(.snappy) { expanded = false } }
-                    .transition(.opacity.combined(with: .scale(scale: 0.95, anchor: .top)))
-            } else {
-                SummaryPill(store: store) { withAnimation(.snappy) { expanded = true } }
-                    .transition(.opacity)
+                SessionStack(store: store, showIdle: showIdle)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
             }
-            Spacer(minLength: 0)
         }
-        .frame(width: 280, alignment: .top)
-        .frame(maxHeight: .infinity, alignment: .top)
+        .padding(12)
+        .frame(width: 284)
+        .fixedSize(horizontal: false, vertical: true)
+        .background(GeometryReader { g in
+            Color.clear
+                .onAppear { (NSApp.delegate as? AppDelegate)?.fit(g.size) }
+                .onChange(of: g.size) { _, size in (NSApp.delegate as? AppDelegate)?.fit(size) }
+        })
         .contextMenu {
+            Picker("Pet", selection: $library.selectedId) {
+                ForEach(library.pets) { Text($0.name).tag($0.id) }
+            }
+            Button("Import Pet…") { library.importPet() }
+            Button("Open Pets Folder") { library.openFolder() }
+            Button("Reload Pets") { library.reload() }
+            Divider()
+            Picker("Size", selection: $petScale) {
+                Text("Small").tag(0.8)
+                Text("Medium").tag(1.0)
+                Text("Large").tag(1.25)
+            }
+            Toggle("Show Idle Sessions", isOn: $showIdle)
             Button(expanded ? "Hide Sessions" : "Show Sessions") { withAnimation(.snappy) { expanded.toggle() } }
             Button("Clear Finished") { store.dismissAllFinished() }
             Button("Reset Position") { (NSApp.delegate as? AppDelegate)?.resetPosition() }
@@ -331,6 +616,8 @@ struct PetView: View {
 }
 
 struct WindowDragGesture: Gesture {
+    @Binding var direction: Int
+
     var body: some Gesture {
         DragGesture(minimumDistance: 3, coordinateSpace: .global)
             .onChanged { _ in
@@ -338,192 +625,192 @@ struct WindowDragGesture: Gesture {
                       let event = NSApp.currentEvent else { return }
                 w.setFrameOrigin(NSPoint(x: w.frame.origin.x + event.deltaX,
                                          y: w.frame.origin.y - event.deltaY))
+                if event.deltaX > 0.5 { direction = 1 } else if event.deltaX < -0.5 { direction = -1 }
             }
             .onEnded { _ in
-                if let w = NSApp.windows.first(where: { $0 is PetPanel }) {
-                    UserDefaults.standard.set(NSStringFromPoint(w.frame.origin), forKey: "origin")
-                }
+                direction = 0
+                (NSApp.delegate as? AppDelegate)?.savePosition()
             }
     }
 }
 
-/// Shown under the pet while the list is collapsed: counts at a glance.
-struct SummaryPill: View {
+/// The small pill under the pet: new session, live counts, and the list toggle.
+struct ControlPill: View {
     @ObservedObject var store: SessionStore
-    let expand: () -> Void
+    @Binding var expanded: Bool
 
     var body: some View {
-        Button(action: expand) {
-            HStack(spacing: 8) {
-                if !store.waiting.isEmpty { count(store.waiting.count, "need you", .orange) }
-                if !store.busy.isEmpty { count(store.busy.count, "working", .blue) }
-                if !store.done.isEmpty { count(store.done.count, "done", .green) }
-                if store.waiting.isEmpty && store.busy.isEmpty && store.done.isEmpty {
-                    Text("all quiet").foregroundStyle(.secondary)
-                }
-                Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
+        HStack(spacing: 0) {
+            Button { openURL("claude://code/new?source=claude_pet") } label: {
+                Image(systemName: "square.and.pencil")
+                    .font(.system(size: 14, weight: .medium))
+                    .frame(width: 40, height: 32)
+                    .contentShape(Rectangle())
             }
-            .font(.system(size: 11, weight: .medium))
-            .padding(.horizontal, 10).padding(.vertical, 5)
-            .background(.regularMaterial, in: Capsule())
-            .overlay(Capsule().strokeBorder(.white.opacity(0.15)))
-            .shadow(color: .black.opacity(0.15), radius: 6, y: 2)
+            .buttonStyle(.plain)
+            .help("New Claude Code session")
+
+            Rectangle().fill(Color.primary.opacity(0.1)).frame(width: 1, height: 16)
+
+            Button { withAnimation(.snappy) { expanded.toggle() } } label: {
+                HStack(spacing: 9) {
+                    counts
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(expanded ? 180 : 0))
+                }
+                .padding(.horizontal, 12)
+                .frame(height: 32)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(expanded ? "Hide sessions" : "Show sessions")
         }
-        .buttonStyle(.plain)
-        .help("Show sessions")
+        .card(radius: 16)
     }
 
-    func count(_ n: Int, _ label: String, _ c: Color) -> some View {
+    @ViewBuilder var counts: some View {
+        if store.waiting.isEmpty && store.busy.isEmpty && store.done.isEmpty {
+            Text("Idle").font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary)
+        } else {
+            HStack(spacing: 8) {
+                if !store.waiting.isEmpty { count(store.waiting.count, Theme.waiting) }
+                if !store.busy.isEmpty { count(store.busy.count, Theme.working) }
+                if !store.done.isEmpty { count(store.done.count, Theme.done) }
+            }
+        }
+    }
+
+    func count(_ n: Int, _ c: Color) -> some View {
         HStack(spacing: 4) {
             Circle().fill(c).frame(width: 7, height: 7)
-            Text("\(n) \(label)")
+            Text("\(n)").font(.system(size: 12, weight: .semibold, design: .rounded)).monospacedDigit()
         }
     }
 }
 
-/// A titled, collapsible group of rows. Collapsed state is remembered per group.
-struct SessionGroup<Content: View>: View {
-    let title: String
-    let count: Int
-    let color: Color
-    @AppStorage private var collapsed: Bool
-    @ViewBuilder let content: () -> Content
+/// The sessions as a stack of small cards, most urgent first.
+struct SessionStack: View {
+    @ObservedObject var store: SessionStore
+    let showIdle: Bool
+    static let maxCards = 5
 
-    init(_ title: String, count: Int, color: Color, key: String, @ViewBuilder content: @escaping () -> Content) {
-        self.title = title; self.count = count; self.color = color; self.content = content
-        _collapsed = AppStorage(wrappedValue: false, "collapsed." + key)
+    struct Item: Identifiable {
+        let session: SessionInfo
+        let kind: SessionToast.Kind
+        let detail: String
+        let time: String
+        var id: String { session.id }
+    }
+
+    var items: [Item] {
+        var out: [Item] = []
+        out += store.waiting.map { Item(session: $0, kind: .waiting,
+                                        detail: $0.waitingFor.map { "Needs you · \($0)" } ?? "Needs you",
+                                        time: ago($0.statusUpdatedAt)) }
+        out += store.busy.map { Item(session: $0, kind: .busy, detail: "Working…", time: ago($0.statusUpdatedAt)) }
+        out += store.done.map { Item(session: $0, kind: .done, detail: "Finished · click to clear",
+                                     time: ago(store.finished[$0.id] ?? $0.statusUpdatedAt)) }
+        if showIdle {
+            out += store.sessions.filter { $0.state == .idle && store.finished[$0.id] == nil }
+                .map { Item(session: $0, kind: .idle, detail: "Idle", time: ago($0.statusUpdatedAt)) }
+        }
+        return out
     }
 
     var body: some View {
-        if count > 0 {
-            VStack(alignment: .leading, spacing: 0) {
-                Button { withAnimation(.snappy) { collapsed.toggle() } } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 8, weight: .bold))
-                            .rotationEffect(.degrees(collapsed ? 0 : 90))
-                        Text(title.uppercased()).font(.system(size: 10, weight: .semibold)).tracking(0.5)
-                        Text("\(count)")
-                            .font(.system(size: 10, weight: .bold, design: .rounded))
-                            .foregroundStyle(color)
-                        Spacer()
+        let all = items
+        VStack(spacing: 6) {
+            if all.isEmpty {
+                Text("Nothing running right now")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                    .padding(.horizontal, 14).padding(.vertical, 9)
+                    .card(radius: 14)
+            }
+            ForEach(all.prefix(Self.maxCards)) { item in
+                SessionToast(session: item.session, kind: item.kind, detail: item.detail, time: item.time) {
+                    switch item.kind {
+                    case .waiting: openURL("claude://code/needs-input?source=claude_pet")
+                    case .done: store.dismissFinished(item.session.id); activateClaude()
+                    default: activateClaude()
                     }
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 8).padding(.vertical, 4)
-                    .contentShape(Rectangle())
+                }
+            }
+            if all.count > Self.maxCards {
+                Button { activateClaude() } label: {
+                    Text("+\(all.count - Self.maxCards) more")
+                        .font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
-                if !collapsed { content() }
             }
         }
     }
 }
 
-struct SessionCard: View {
-    @ObservedObject var store: SessionStore
-    let collapse: () -> Void
-    @AppStorage("showIdle") private var showIdle = false
+/// One session, styled like a notification card.
+struct SessionToast: View {
+    enum Kind { case waiting, busy, done, idle }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            if store.waiting.isEmpty && store.busy.isEmpty && store.done.isEmpty {
-                Text("All quiet. Nothing running.")
-                    .font(.system(size: 12)).foregroundStyle(.secondary)
-                    .padding(.horizontal, 10).padding(.vertical, 6)
-            }
-            SessionGroup("Needs you", count: store.waiting.count, color: .orange, key: "waiting") {
-                ForEach(store.waiting) { s in
-                    SessionRow(session: s, dot: .orange, detail: "needs you" + (s.waitingFor.map { " · \($0)" } ?? "")) {
-                        openURL("claude://code/needs-input?source=claude_pet")
-                    }
-                }
-            }
-            SessionGroup("Working", count: store.busy.count, color: .blue, key: "busy") {
-                ForEach(store.busy) { s in
-                    SessionRow(session: s, dot: .blue, detail: "working · \(ago(s.statusUpdatedAt))", pulsing: true) {
-                        activateClaude()
-                    }
-                }
-            }
-            SessionGroup("Done", count: store.done.count, color: .green, key: "done") {
-                ForEach(store.done) { s in
-                    SessionRow(session: s, dot: .green, detail: "done · \(ago(store.finished[s.id] ?? s.statusUpdatedAt)) ago") {
-                        store.dismissFinished(s.id)
-                        activateClaude()
-                    }
-                }
-            }
-            if showIdle {
-                SessionGroup("Idle", count: store.idleCount, color: .gray, key: "idle") {
-                    ForEach(store.sessions.filter { $0.state == .idle && store.finished[$0.id] == nil }) { s in
-                        SessionRow(session: s, dot: .gray.opacity(0.5), detail: "idle") { activateClaude() }
-                    }
-                }
-            }
-
-            Divider().padding(.vertical, 3)
-
-            HStack(spacing: 6) {
-                Button { openURL("claude://code/new?source=claude_pet") } label: {
-                    Label("New", systemImage: "square.and.pencil")
-                }
-                Button { activateClaude() } label: {
-                    Label("Open", systemImage: "arrow.up.forward.app")
-                }
-                Spacer()
-                Button { showIdle.toggle() } label: {
-                    Text(showIdle ? "hide idle" : "+\(store.idleCount) idle")
-                }
-                .help("Show or hide sessions that are open but not doing anything")
-                Button(action: collapse) { Image(systemName: "chevron.up") }
-                    .help("Collapse")
-            }
-            .buttonStyle(.borderless)
-            .font(.system(size: 11, weight: .medium))
-            .padding(.horizontal, 8).padding(.bottom, 2)
-        }
-        .padding(6)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(.white.opacity(0.15)))
-        .shadow(color: .black.opacity(0.18), radius: 10, y: 4)
-    }
-
-    func ago(_ d: Date) -> String {
-        let s = max(0, Int(Date().timeIntervalSince(d)))
-        if s < 60 { return "\(s)s" }
-        if s < 3600 { return "\(s / 60)m" }
-        return "\(s / 3600)h"
-    }
-}
-
-struct SessionRow: View {
     let session: SessionInfo
-    let dot: Color
+    let kind: Kind
     let detail: String
-    var pulsing = false
+    let time: String
     let action: () -> Void
     @State private var hover = false
-    @State private var pulse = false
+
+    var tint: Color {
+        switch kind {
+        case .waiting: return Theme.waiting
+        case .busy: return Theme.working
+        case .done: return Theme.done
+        case .idle: return .secondary
+        }
+    }
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 8) {
-                Circle().fill(dot).frame(width: 8, height: 8)
-                    .opacity(pulsing && pulse ? 0.35 : 1)
-                    .animation(pulsing ? .easeInOut(duration: 0.8).repeatForever() : .default, value: pulse)
-                VStack(alignment: .leading, spacing: 0) {
-                    Text(session.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
-                    Text(detail).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+            HStack(spacing: 10) {
+                ZStack {
+                    Circle().fill(tint.opacity(0.14))
+                    switch kind {
+                    case .busy:
+                        ProgressView().controlSize(.mini)
+                    case .waiting:
+                        Image(systemName: "exclamationmark").font(.system(size: 10, weight: .heavy)).foregroundStyle(tint)
+                    case .done:
+                        Image(systemName: "checkmark").font(.system(size: 9, weight: .heavy)).foregroundStyle(tint)
+                    case .idle:
+                        Image(systemName: "moon.fill").font(.system(size: 8)).foregroundStyle(tint)
+                    }
                 }
-                Spacer(minLength: 0)
+                .frame(width: 22, height: 22)
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(session.name)
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .lineLimit(1)
+                    Text(detail)
+                        .font(.system(size: 11))
+                        .foregroundStyle(kind == .waiting ? AnyShapeStyle(tint) : AnyShapeStyle(.secondary))
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 4)
+                if hover {
+                    Image(systemName: "arrow.up.right").font(.system(size: 10, weight: .bold)).foregroundStyle(.secondary)
+                } else {
+                    Text(time).font(.system(size: 11, weight: .medium)).monospacedDigit().foregroundStyle(.tertiary)
+                }
             }
-            .padding(.horizontal, 8).padding(.vertical, 5)
-            .background(RoundedRectangle(cornerRadius: 8).fill(hover ? Color.primary.opacity(0.08) : .clear))
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .card(radius: 14)
+            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(hover ? tint.opacity(0.5) : .clear, lineWidth: 1))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { hover = $0 }
-        .onAppear { pulse = true }
     }
 }
 
@@ -548,13 +835,20 @@ final class PetPanel: NSPanel {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var panel: PetPanel!
     let store = SessionStore()
+    let library = PetLibrary()
 
     func applicationDidFinishLaunching(_ note: Notification) {
+        // One pet at a time.
+        if let id = Bundle.main.bundleIdentifier,
+           NSRunningApplication.runningApplications(withBundleIdentifier: id)
+            .contains(where: { $0 != NSRunningApplication.current && !$0.isTerminated }) {
+            NSApp.terminate(nil)
+            return
+        }
         NSApp.setActivationPolicy(.accessory)   // no Dock icon
         store.start()
 
-        let size = NSSize(width: 290, height: 520)
-        panel = PetPanel(contentRect: NSRect(origin: .zero, size: size),
+        panel = PetPanel(contentRect: NSRect(x: 0, y: 0, width: 284, height: 200),
                          styleMask: [.borderless, .nonactivatingPanel],
                          backing: .buffered, defer: false)
         panel.level = .floating
@@ -565,26 +859,142 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.hidesOnDeactivate = false
         panel.isMovableByWindowBackground = false
 
-        let host = NSHostingView(rootView: PetView(store: store))
-        host.frame = NSRect(origin: .zero, size: size)
+        let host = NSHostingView(rootView: PetView(store: store, library: library))
+        host.sizingOptions = []                 // the panel follows the content via fit(_:)
+        host.autoresizingMask = [.width, .height]
+        host.frame = panel.contentLayoutRect
         panel.contentView = host
 
-        if let s = UserDefaults.standard.string(forKey: "origin") {
-            panel.setFrameOrigin(NSPointFromString(s))
-        } else if let screen = NSScreen.main {
-            let v = screen.visibleFrame
-            panel.setFrameOrigin(NSPoint(x: v.maxX - size.width - 20, y: v.maxY - size.height - 10))
+        if let s = UserDefaults.standard.string(forKey: "topLeft") {
+            place(topLeft: NSPointFromString(s))
+        } else {
+            resetPosition()
         }
-
-
         panel.orderFrontRegardless()
     }
 
+    /// Resizes the panel to the content, keeping its top-left corner where it is.
+    func fit(_ size: CGSize) {
+        guard let panel, size.width > 0, size.height > 0,
+              abs(panel.frame.width - size.width) > 0.5 || abs(panel.frame.height - size.height) > 0.5 else { return }
+        let top = panel.frame.maxY
+        panel.setFrame(NSRect(x: panel.frame.minX, y: top - size.height, width: size.width, height: size.height),
+                       display: true)
+    }
+
+    /// Moves the panel so its top-left is at `p`, kept on screen.
+    func place(topLeft p: NSPoint) {
+        var p = p
+        if let v = (NSScreen.screens.first { $0.frame.contains(p) } ?? NSScreen.main)?.visibleFrame {
+            p.x = min(max(p.x, v.minX), v.maxX - panel.frame.width)
+            p.y = min(max(p.y, v.minY + 120), v.maxY)
+        }
+        panel.setFrameTopLeftPoint(p)
+    }
+
+    func savePosition() {
+        UserDefaults.standard.set(NSStringFromPoint(NSPoint(x: panel.frame.minX, y: panel.frame.maxY)), forKey: "topLeft")
+    }
+
     func resetPosition() {
-        UserDefaults.standard.removeObject(forKey: "origin")
-        if let screen = NSScreen.main {
-            let v = screen.visibleFrame
-            panel.setFrameOrigin(NSPoint(x: v.maxX - panel.frame.width - 20, y: v.maxY - panel.frame.height - 10))
+        UserDefaults.standard.removeObject(forKey: "topLeft")
+        if let v = NSScreen.main?.visibleFrame {
+            place(topLeft: NSPoint(x: v.maxX - panel.frame.width - 16, y: v.maxY - 12))
+        }
+    }
+}
+
+// MARK: - App icon
+
+/// Draws the app icon from the same sprite the pet uses. build.sh calls
+/// `ClaudePet --render-icon <dir>` to produce the .iconset.
+enum IconRenderer {
+    static func render(size: Int) -> Data? {
+        // Below 64px the sprite can't fit at whole pixels; draw at 128 and scale down.
+        if size < 64 {
+            guard let big = render(size: 128), let src = NSBitmapImageRep(data: big)?.cgImage,
+                  let ctx = CGContext(data: nil, width: size, height: size, bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+            ctx.interpolationQuality = .high
+            ctx.draw(src, in: CGRect(x: 0, y: 0, width: size, height: size))
+            guard let img = ctx.makeImage() else { return nil }
+            return NSBitmapImageRep(cgImage: img).representation(using: .png, properties: [:])
+        }
+        let s = CGFloat(size)
+        guard let ctx = CGContext(data: nil, width: size, height: size, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        ctx.interpolationQuality = .none
+        func cg(_ c: Color) -> CGColor { NSColor(c).usingColorSpace(.sRGB)!.cgColor }
+        func rgb(_ r: CGFloat, _ g: CGFloat, _ b: CGFloat) -> CGColor { CGColor(srgbRed: r, green: g, blue: b, alpha: 1) }
+
+        // macOS icon grid: an 824/1024 rounded square, centered, with a soft drop shadow.
+        let inset = s * 100 / 1024
+        let tile = CGRect(x: inset, y: inset, width: s - inset * 2, height: s - inset * 2)
+        let tilePath = CGPath(roundedRect: tile, cornerWidth: tile.width * 0.225, cornerHeight: tile.width * 0.225, transform: nil)
+        ctx.saveGState()
+        ctx.setShadow(offset: CGSize(width: 0, height: -s * 0.012), blur: s * 0.03, color: CGColor(gray: 0, alpha: 0.35))
+        ctx.addPath(tilePath); ctx.setFillColor(rgb(0.10, 0.09, 0.20)); ctx.fillPath()
+        ctx.restoreGState()
+
+        // Night-lab gradient, faint pixel grid, and a few stars.
+        ctx.saveGState()
+        ctx.addPath(tilePath); ctx.clip()
+        let grad = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB),
+                              colors: [rgb(0.29, 0.22, 0.52), rgb(0.12, 0.10, 0.27)] as CFArray, locations: [0, 1])!
+        ctx.drawLinearGradient(grad, start: CGPoint(x: 0, y: tile.maxY), end: CGPoint(x: 0, y: tile.minY), options: [])
+        let cell = tile.width / 20
+        if size >= 128 {
+            ctx.setStrokeColor(CGColor(gray: 1, alpha: 0.045)); ctx.setLineWidth(max(1, s / 512))
+            var x = tile.minX
+            while x <= tile.maxX { ctx.move(to: CGPoint(x: x, y: tile.minY)); ctx.addLine(to: CGPoint(x: x, y: tile.maxY)); x += cell }
+            var y = tile.minY
+            while y <= tile.maxY { ctx.move(to: CGPoint(x: tile.minX, y: y)); ctx.addLine(to: CGPoint(x: tile.maxX, y: y)); y += cell }
+            ctx.strokePath()
+        }
+        // A glow behind the pet
+        let glow = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB),
+                              colors: [CGColor(srgbRed: 0.85, green: 0.47, blue: 0.34, alpha: 0.45),
+                                       CGColor(srgbRed: 0.85, green: 0.47, blue: 0.34, alpha: 0)] as CFArray, locations: [0, 1])!
+        ctx.drawRadialGradient(glow, startCenter: CGPoint(x: s / 2, y: s * 0.52), startRadius: 0,
+                               endCenter: CGPoint(x: s / 2, y: s * 0.52), endRadius: tile.width * 0.48, options: [])
+        let spark = cg(PixelPet.palette["Y"]!)
+        for (cx, cy, k) in [(3, 15, 1.0), (16, 16, 1.0), (15, 4, 0.7), (2, 6, 0.7)] as [(Int, Int, CGFloat)] {
+            ctx.setFillColor(spark.copy(alpha: k)!)
+            ctx.fill(CGRect(x: tile.minX + CGFloat(cx) * cell, y: tile.minY + CGFloat(cy) * cell, width: cell, height: cell))
+        }
+        ctx.restoreGState()
+
+        // The pet, snapped to whole pixels so small sizes stay crisp.
+        let rows = PixelPet.grid(.idle, frame: 0, blink: false, look: 0)
+        let px = max(1, floor(tile.width * 0.68 / 16))
+        let w = px * 16, h = px * CGFloat(rows.count)
+        let ox = floor((s - w) / 2), oy = floor((s - h) / 2 - s * 0.01)
+        // floor shadow
+        ctx.setFillColor(CGColor(gray: 0, alpha: 0.28))
+        ctx.fillEllipse(in: CGRect(x: ox + px * 2, y: oy - px * 0.9, width: w - px * 4, height: px * 1.6))
+        for (r, row) in rows.enumerated() {
+            for (c, ch) in row.enumerated() {
+                guard let color = PixelPet.palette[ch] else { continue }
+                ctx.setFillColor(cg(color))
+                ctx.fill(CGRect(x: ox + CGFloat(c) * px, y: oy + h - CGFloat(r + 1) * px, width: px, height: px))
+            }
+        }
+
+        guard let img = ctx.makeImage() else { return nil }
+        return NSBitmapImageRep(cgImage: img).representation(using: .png, properties: [:])
+    }
+
+    static func writeIconset(to dir: String) {
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        for base in [16, 32, 128, 256, 512] {
+            for scale in [1, 2] {
+                let name = scale == 1 ? "icon_\(base)x\(base).png" : "icon_\(base)x\(base)@2x.png"
+                if let data = render(size: base * scale) {
+                    try? data.write(to: URL(fileURLWithPath: dir).appendingPathComponent(name))
+                }
+            }
         }
     }
 }
@@ -592,6 +1002,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @main
 enum ClaudePetMain {
     static func main() {
+        let args = CommandLine.arguments
+        if let i = args.firstIndex(of: "--render-icon"), i + 1 < args.count {
+            IconRenderer.writeIconset(to: args[i + 1])
+            return
+        }
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate
