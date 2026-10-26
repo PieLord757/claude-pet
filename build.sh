@@ -36,7 +36,7 @@ cat > $APP/Contents/Info.plist <<PLIST
   <key>CFBundleIdentifier</key><string>local.claudepet</string>
   <key>CFBundleExecutable</key><string>ClaudePet</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.3.1</string>
+  <key>CFBundleShortVersionString</key><string>0.3.2</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>LSUIElement</key><true/>

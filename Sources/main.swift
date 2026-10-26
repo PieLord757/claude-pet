@@ -1151,8 +1151,16 @@ func activateClaude() {
 
 // MARK: - Window
 
+/// The pet never takes keyboard focus: a non-activating panel that becomes key receives
+/// keystrokes even while another app is in front, which would steal whatever you're typing.
 final class PetPanel: NSPanel {
-    override var canBecomeKey: Bool { true }
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+}
+
+/// Clicks land on the first try even though the panel is never the key window.
+final class PetHostingView<Content: View>: NSHostingView<Content> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -1181,8 +1189,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.hasShadow = false
         panel.hidesOnDeactivate = false
         panel.isMovableByWindowBackground = false
+        panel.becomesKeyOnlyIfNeeded = true
 
-        let host = NSHostingView(rootView: PetView(store: store, library: library))
+        let host = PetHostingView(rootView: PetView(store: store, library: library))
         host.sizingOptions = []                 // the panel follows the content via fit(_:)
         host.autoresizingMask = [.width, .height]
         host.frame = panel.contentLayoutRect
@@ -1226,6 +1235,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             savePosition()
         }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        panel?.orderFrontRegardless()
+        return false
     }
 
     /// Resizes the panel to the content, keeping its top-left corner where it is.
