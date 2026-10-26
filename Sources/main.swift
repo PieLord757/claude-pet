@@ -284,6 +284,13 @@ final class SessionStore: ObservableObject {
         finished[id] = nil
     }
 
+    /// Clicking a card opens its chat: hide its Done card right away instead of waiting
+    /// for the app to save its unread list.
+    func markOpened(_ s: SessionInfo) {
+        guard finished[s.id] != nil else { return }
+        dismissFinished(s.id)
+    }
+
     func dismissAllFinished() {
         for id in finished.keys { dismissFinished(id) }
     }
@@ -371,9 +378,13 @@ final class SessionStore: ObservableObject {
         var newFinished: [String: Date] = [:]
         func isUnread(_ chat: DesktopChat) -> Bool {
             if chat.isArchived { return false }
+            let edge = chat.lastTurnEdgeAt ?? chat.lastActivityAt
+            // Opened since its last turn: read. The app saves lastFocusedAt within a second or
+            // two, but writes its unread list to disk much later, so this clears cards sooner.
+            if let edge, let focused = chat.lastFocusedAt, focused >= edge { return false }
             if let ids = unread.ids { return ids.contains(chat.hostId) }
             // No list from the app yet: a turn that ended after the chat was last opened.
-            guard let edge = chat.lastTurnEdgeAt ?? chat.lastActivityAt else { return false }
+            guard let edge else { return false }
             return edge > (chat.lastFocusedAt ?? 0)
         }
         func edgeDate(_ chat: DesktopChat?) -> Date? {
@@ -993,6 +1004,7 @@ struct SessionStack: View {
             }
             ForEach(all.prefix(Self.maxCards)) { item in
                 SessionToast(session: item.session, kind: item.kind, detail: item.detail, time: item.time) {
+                    store.markOpened(item.session)
                     openSession(item.session)
                 }
             }
@@ -1595,6 +1607,24 @@ enum SelfTest {
         store.poll()
         expect(store.finished["local_old"] == Date(timeIntervalSince1970: 4), "falls back to last activity time")
         try? FileManager.default.removeItem(at: desk.appendingPathComponent("acct/org/local_old.json"))
+
+        // Opened in the app after its last turn: read, even before the app saves its list.
+        chat(desk, "local_a", title: "A", edge: 5000, focused: 5500, bump: 1)
+        store.poll()
+        expect(!store.done.contains { $0.id == "s-a" }, "opening a chat clears it before the list catches up")
+        chat(desk, "local_a", title: "A", edge: 5000, focused: 1000, bump: 2)
+        store.poll()
+
+        // Clicking a card hides it straight away.
+        expect(store.done.contains { $0.id == "s-a" }, "A is done again")
+        store.markOpened(store.sessions.first { $0.id == "s-a" }!)
+        store.poll()
+        expect(!store.done.contains { $0.id == "s-a" }, "clicking a card hides it immediately")
+        chat(desk, "local_a", title: "A", edge: 8000, focused: 1000, bump: 3)
+        store.poll()
+        expect(store.done.contains { $0.id == "s-a" }, "a new turn after opening brings it back")
+        chat(desk, "local_a", title: "A", edge: 5000, focused: 1000, bump: 4)
+        store.poll()
 
         // Read in the app: A leaves the list.
         write(log([batch(seq: 1, [(unreadKey, unreadValue(["local_a", "local_b"]))]),
