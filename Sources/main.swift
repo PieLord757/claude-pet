@@ -50,6 +50,14 @@ final class SessionStore: ObservableObject {
     private var idleSince: [String: Date] = [:]           // debounce busy -> idle flicker
     private var timer: Timer?
 
+    // The desktop app keeps one file per Code-tab chat, named by its hostSessionId,
+    // with `lastFocusedAt` (ms) updated whenever that chat comes on screen.
+    private let desktopDir = ProcessInfo.processInfo.environment["CLAUDE_PET_DESKTOP_DIR"].map { URL(fileURLWithPath: $0) }
+        ?? FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Claude/claude-code-sessions")
+    private var desktopPaths: [String: URL] = [:]
+    private var focusCache: [String: (modified: Date, focusedAt: Double?)] = [:]
+
     static let doneDebounce: TimeInterval = 3
     static let doneExpiry: TimeInterval = 30 * 60
 
@@ -60,6 +68,53 @@ final class SessionStore: ObservableObject {
 
     func dismissFinished(_ id: String) { finished[id] = nil }
     func dismissAllFinished() { finished.removeAll() }
+
+    /// Drops "done" entries for desktop chats you've already looked at: opened after they
+    /// finished, or on screen right now (Claude in front with that chat focused last).
+    private func clearReadInDesktopApp(_ finished: inout [String: Date], sessions: [SessionInfo]) {
+        guard !finished.isEmpty else { return }
+        let claudeInFront = NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.anthropic.claudefordesktop"
+        var onScreen: String?
+        if claudeInFront {
+            onScreen = sessions.compactMap { s -> (String, Double)? in
+                guard let h = s.hostSessionId, let f = lastFocusedAt(h) else { return nil }
+                return (s.id, f)
+            }.max { $0.1 < $1.1 }?.0
+        }
+        for (id, since) in finished {
+            guard let s = sessions.first(where: { $0.id == id }), let h = s.hostSessionId else { continue }
+            if id == onScreen {
+                finished[id] = nil
+            } else if let f = lastFocusedAt(h), f / 1000 >= since.timeIntervalSince1970 {
+                finished[id] = nil
+            }
+        }
+    }
+
+    private func lastFocusedAt(_ hostId: String) -> Double? {
+        guard let url = desktopPath(hostId),
+              let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        else { return nil }
+        if let c = focusCache[hostId], c.modified == modified { return c.focusedAt }
+        let json = (try? Data(contentsOf: url)).flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
+        let focusedAt = (json?["lastFocusedAt"] as? NSNumber)?.doubleValue
+        focusCache[hostId] = (modified, focusedAt)
+        return focusedAt
+    }
+
+    private func desktopPath(_ hostId: String) -> URL? {
+        if let u = desktopPaths[hostId], FileManager.default.fileExists(atPath: u.path) { return u }
+        let fm = FileManager.default
+        let name = hostId + ".json"
+        // <account>/<org>/<hostSessionId>.json
+        for a in (try? fm.contentsOfDirectory(at: desktopDir, includingPropertiesForKeys: nil)) ?? [] {
+            for b in (try? fm.contentsOfDirectory(at: a, includingPropertiesForKeys: nil)) ?? [] {
+                let u = b.appendingPathComponent(name)
+                if fm.fileExists(atPath: u.path) { desktopPaths[hostId] = u; return u }
+            }
+        }
+        return nil
+    }
 
     private func isAlive(_ pid: Int32) -> Bool {
         kill(pid, 0) == 0 || errno == EPERM
@@ -116,6 +171,7 @@ final class SessionStore: ObservableObject {
         }
         let liveIds = Set(result.map(\.id))
         newFinished = newFinished.filter { liveIds.contains($0.key) && now.timeIntervalSince($0.value) < Self.doneExpiry }
+        clearReadInDesktopApp(&newFinished, sessions: result)
 
         result.sort { a, b in
             func rank(_ s: SessionInfo) -> Int {
@@ -574,7 +630,7 @@ struct PetView: View {
             ControlPill(store: store, expanded: $expanded)
 
             if expanded {
-                SessionStack(store: store, showIdle: showIdle)
+                SessionStack(store: store, showIdle: showIdle, second: frame / 8)
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
@@ -694,6 +750,7 @@ struct ControlPill: View {
 struct SessionStack: View {
     @ObservedObject var store: SessionStore
     let showIdle: Bool
+    let second: Int          // changes every second so the times on the cards tick
     static let maxCards = 5
 
     struct Item: Identifiable {

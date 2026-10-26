@@ -10,7 +10,7 @@ It floats above every app and desktop and shows:
 
 - 🟠 **Needs you**: a session is blocked on a permission prompt or a question
 - 🔵 **Working**: Claude is busy in that session
-- 🟢 **Done**: a session just finished (the pet cheers; the card stays until you click it)
+- 🟢 **Done**: a session just finished (the pet cheers; the card clears when you read that chat in Claude, or when you click it)
 
 The pet reacts too: it sleeps when nothing is running, gets busy while Claude works, and jumps when something finishes.
 
@@ -123,9 +123,10 @@ my-pet/
 
 Every running Claude Code session writes a small status file to `~/.claude/sessions/<pid>.json` with its name and a `status` of `busy`, `waiting` or `idle` (plus a `waitingFor` reason when blocked). Claude Pet polls that folder once a second:
 
-- Only `*.json` files are read. Nothing else in `~/.claude` is touched.
+- Only `*.json` files are read there. Nothing else in `~/.claude` is touched.
 - A session counts only while its process is alive (`kill(pid, 0)`).
 - A busy → idle change shows as **Done** after a 3 second debounce, and expires after 30 minutes.
+- For chats in the Claude desktop app, a **Done** card clears by itself once you've seen the chat: when you open it after it finished, or when it's the chat on screen as it finishes. The pet reads only the `lastFocusedAt` time from the app's per-chat file in `~/Library/Application Support/Claude/claude-code-sessions/`. Terminal sessions have no such file, so clear those by clicking the card.
 - The app makes no network requests. It writes only its own preferences (`defaults read local.claudepet`) and the pets you import.
 
 ⚠️ That status file is an internal Claude Code detail, not a documented API. A future Claude Code update could change it and break the pet. If that happens, the parsing lives in `SessionStore.poll()`.
