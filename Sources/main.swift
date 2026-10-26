@@ -705,7 +705,9 @@ final class PetLibrary: ObservableObject {
         panel.allowsMultipleSelection = false
         panel.allowedContentTypes = [.folder, .png, .webP]
         NSApp.activate()
-        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let result = panel.runModal()
+        NSApp.deactivate()          // hand focus back to the app you were in
+        guard result == .OK, let url = panel.url else { return }
 
         let fm = FileManager.default
         var dest: URL?
@@ -866,26 +868,6 @@ struct PetView: View {
                 .onAppear { (NSApp.delegate as? AppDelegate)?.fit(g.size) }
                 .onChange(of: g.size) { _, size in (NSApp.delegate as? AppDelegate)?.fit(size) }
         })
-        .contextMenu {
-            Picker("Pet", selection: $library.selectedId) {
-                ForEach(library.pets) { Text($0.name).tag($0.id) }
-            }
-            Button("Import Pet…") { library.importPet() }
-            Button("Open Pets Folder") { library.openFolder() }
-            Button("Reload Pets") { library.reload() }
-            Divider()
-            Picker("Size", selection: $petScale) {
-                Text("Small").tag(0.8)
-                Text("Medium").tag(1.0)
-                Text("Large").tag(1.25)
-            }
-            Toggle("Show Idle Sessions", isOn: $showIdle)
-            Button(expanded ? "Hide Sessions" : "Show Sessions") { withAnimation(.snappy) { expanded.toggle() } }
-            Button("Clear Finished") { store.dismissAllFinished() }
-            Button("Reset Position") { (NSApp.delegate as? AppDelegate)?.resetPosition() }
-            Divider()
-            Button("Close Pet") { NSApp.terminate(nil) }
-        }
         .onReceive(tick) { _ in
             frame &+= 1
             let n = store.done.count
@@ -1158,9 +1140,15 @@ final class PetPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
-/// Clicks land on the first try even though the panel is never the key window.
+/// Clicks land on the first try even though the panel is never the key window, and the
+/// right-click menu is an AppKit menu: SwiftUI's context menu needs a window that can be key.
 final class PetHostingView<Content: View>: NSHostingView<Content> {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func rightMouseDown(with event: NSEvent) {
+        guard let menu = (NSApp.delegate as? AppDelegate)?.makeMenu() else { return }
+        NSMenu.popUpContextMenu(menu, with: event, for: self)
+    }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -1182,7 +1170,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel = PetPanel(contentRect: NSRect(x: 0, y: 0, width: 304, height: 200),
                          styleMask: [.borderless, .nonactivatingPanel],
                          backing: .buffered, defer: false)
-        panel.level = .floating
+        // Above other apps' floating panels (some leave large invisible overlays at .floating
+        // that would otherwise swallow clicks on the pet).
+        panel.level = .statusBar
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         panel.isOpaque = false
         panel.backgroundColor = .clear
@@ -1236,6 +1226,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             savePosition()
         }
     }
+
+    // MARK: Right-click menu
+
+    func makeMenu() -> NSMenu {
+        let d = UserDefaults.standard
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        func item(_ title: String, _ action: Selector, state: Bool = false, object: Any? = nil) -> NSMenuItem {
+            let i = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            i.target = self
+            i.state = state ? .on : .off
+            i.representedObject = object
+            return i
+        }
+
+        let pets = NSMenu()
+        for p in library.pets {
+            pets.addItem(item(p.name, #selector(choosePet(_:)), state: p.id == library.selectedId, object: p.id))
+        }
+        let petItem = NSMenuItem(title: "Pet", action: nil, keyEquivalent: "")
+        petItem.submenu = pets
+        menu.addItem(petItem)
+        menu.addItem(item("Import Pet…", #selector(importPet)))
+        menu.addItem(item("Open Pets Folder", #selector(openPetsFolder)))
+        menu.addItem(item("Reload Pets", #selector(reloadPets)))
+        menu.addItem(.separator())
+
+        let sizes = NSMenu()
+        let scale = d.object(forKey: "petScale") as? Double ?? 1.0
+        for (name, value) in [("Small", 0.8), ("Medium", 1.0), ("Large", 1.25)] {
+            sizes.addItem(item(name, #selector(chooseSize(_:)), state: abs(scale - value) < 0.01, object: value))
+        }
+        let sizeItem = NSMenuItem(title: "Size", action: nil, keyEquivalent: "")
+        sizeItem.submenu = sizes
+        menu.addItem(sizeItem)
+        menu.addItem(item("Show Idle Sessions", #selector(toggleIdle), state: d.bool(forKey: "showIdle")))
+        let expanded = d.object(forKey: "expanded") as? Bool ?? true
+        menu.addItem(item(expanded ? "Hide Sessions" : "Show Sessions", #selector(toggleExpanded)))
+        menu.addItem(item("Clear Finished", #selector(clearFinished)))
+        menu.addItem(item("Reset Position", #selector(resetPositionAction)))
+        menu.addItem(.separator())
+        menu.addItem(item("Close Pet", #selector(closePet)))
+        return menu
+    }
+
+    @objc func choosePet(_ sender: NSMenuItem) { if let id = sender.representedObject as? String { library.selectedId = id } }
+    @objc func importPet() { library.importPet() }
+    @objc func openPetsFolder() { library.openFolder() }
+    @objc func reloadPets() { library.reload() }
+    @objc func chooseSize(_ sender: NSMenuItem) { if let v = sender.representedObject as? Double { UserDefaults.standard.set(v, forKey: "petScale") } }
+    @objc func toggleIdle() { UserDefaults.standard.set(!UserDefaults.standard.bool(forKey: "showIdle"), forKey: "showIdle") }
+    @objc func toggleExpanded() {
+        let d = UserDefaults.standard
+        d.set(!(d.object(forKey: "expanded") as? Bool ?? true), forKey: "expanded")
+    }
+    @objc func clearFinished() { store.dismissAllFinished() }
+    @objc func resetPositionAction() { resetPosition() }
+    @objc func closePet() { NSApp.terminate(nil) }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         panel?.orderFrontRegardless()
