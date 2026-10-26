@@ -1,0 +1,4 @@
+ClaudePet.app/
+*.zip
+.DS_Store
+.build/
