@@ -314,6 +314,13 @@ struct PetView: View {
         }
         .frame(width: 280, alignment: .top)
         .frame(maxHeight: .infinity, alignment: .top)
+        .contextMenu {
+            Button(expanded ? "Hide Sessions" : "Show Sessions") { withAnimation(.snappy) { expanded.toggle() } }
+            Button("Clear Finished") { store.dismissAllFinished() }
+            Button("Reset Position") { (NSApp.delegate as? AppDelegate)?.resetPosition() }
+            Divider()
+            Button("Close Pet") { NSApp.terminate(nil) }
+        }
         .onReceive(tick) { _ in
             frame &+= 1
             let n = store.done.count
@@ -569,19 +576,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             panel.setFrameOrigin(NSPoint(x: v.maxX - size.width - 20, y: v.maxY - size.height - 10))
         }
 
-        let menu = NSMenu()
-        menu.addItem(withTitle: "Clear finished", action: #selector(clearFinished), keyEquivalent: "")
-        menu.addItem(withTitle: "Reset position", action: #selector(resetPosition), keyEquivalent: "")
-        menu.addItem(.separator())
-        menu.addItem(withTitle: "Quit Claude Pet", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        for item in menu.items where item.action != #selector(NSApplication.terminate(_:)) { item.target = self }
-        host.menu = menu
 
         panel.orderFrontRegardless()
     }
 
-    @objc func clearFinished() { store.dismissAllFinished() }
-    @objc func resetPosition() {
+    func resetPosition() {
         UserDefaults.standard.removeObject(forKey: "origin")
         if let screen = NSScreen.main {
             let v = screen.visibleFrame

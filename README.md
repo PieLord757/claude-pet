@@ -41,9 +41,21 @@ open ClaudePet.app
 
 `build.sh` compiles the single Swift file in `Sources/main.swift` with `swiftc` and wraps it in an app bundle. There is no Xcode project and there are no dependencies. If your default SDK is newer than your compiler (common after a Command Line Tools update), the script automatically falls back to an older installed SDK that works.
 
-### Start it at login
+## Opening and closing the pet
 
-System Settings → General → Login Items → **+** → pick `ClaudePet.app`.
+- **Open:** press `⌘ Space` and type **ClaudePet** (Spotlight), or open it from Launchpad or Finder → Applications.
+- **Close:** right-click the pet → **Close Pet**.
+- **Start at login:** System Settings → General → Login Items → **+** → pick `ClaudePet.app`.
+
+### `/pet` inside Claude Code (optional)
+
+Add a slash command so you can open or close the pet from any Claude Code chat, in the desktop app or the terminal:
+
+```bash
+mkdir -p ~/.claude/commands && cp extras/pet.md ~/.claude/commands/pet.md
+```
+
+Then type `/pet` to open it or `/pet close` to close it. (The Claude desktop app's own menus can't be extended by outside apps, so a slash command is the closest thing to a built-in button.)
 
 ## Using it
 
@@ -58,7 +70,7 @@ System Settings → General → Login Items → **+** → pick `ClaudePet.app`.
 | Click a **Done** row | Clears it and brings Claude to the front |
 | **New** | Starts a new Claude Code session in the desktop app |
 | `+N idle` | Show or hide idle sessions |
-| Right-click the pet | Clear finished, reset position, quit |
+| Right-click the pet or card | Show/hide sessions, clear finished, reset position, **Close Pet** |
 
 Clicking a row can't jump straight to that specific chat yet, because the desktop app doesn't expose a link for it. PRs welcome if you find one.
 
