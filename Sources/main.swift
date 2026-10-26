@@ -859,7 +859,7 @@ struct PetView: View {
             }
         }
         .padding(12)
-        .frame(width: 284)
+        .frame(width: 304)
         .fixedSize(horizontal: false, vertical: true)
         .background(GeometryReader { g in
             Color.clear
@@ -990,8 +990,8 @@ struct SessionStack: View {
         out += store.waiting.map { Item(session: $0, kind: .waiting,
                                         detail: $0.waitingFor.map { "Needs you · \($0)" } ?? "Needs you",
                                         time: ago($0.statusUpdatedAt)) }
-        out += store.busy.map { Item(session: $0, kind: .busy, detail: "Working…", time: ago($0.statusUpdatedAt)) }
-        out += store.done.map { Item(session: $0, kind: .done, detail: "Finished · click to clear",
+        out += store.busy.map { Item(session: $0, kind: .busy, detail: "Working", time: ago($0.statusUpdatedAt)) }
+        out += store.done.map { Item(session: $0, kind: .done, detail: "Finished",
                                      time: ago(store.finished[$0.id] ?? $0.statusUpdatedAt)) }
         if showIdle {
             out += store.sessions.filter { $0.state == .idle && store.finished[$0.id] == nil }
@@ -1011,11 +1011,7 @@ struct SessionStack: View {
             }
             ForEach(all.prefix(Self.maxCards)) { item in
                 SessionToast(session: item.session, kind: item.kind, detail: item.detail, time: item.time) {
-                    switch item.kind {
-                    case .waiting: openURL("claude://code/needs-input?source=claude_pet")
-                    case .done: store.dismissFinished(item.session.id); activateClaude()
-                    default: activateClaude()
-                    }
+                    openSession(item.session)
                 }
             }
             if all.count > Self.maxCards {
@@ -1056,7 +1052,7 @@ struct SessionToast: View {
                     Circle().fill(tint.opacity(0.14))
                     switch kind {
                     case .busy:
-                        ProgressView().controlSize(.mini)
+                        PulseDot(color: tint)
                     case .waiting:
                         Image(systemName: "exclamationmark").font(.system(size: 10, weight: .heavy)).foregroundStyle(tint)
                     case .done:
@@ -1069,19 +1065,24 @@ struct SessionToast: View {
 
                 VStack(alignment: .leading, spacing: 1) {
                     Text(session.name)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         .font(.system(size: 12.5, weight: .semibold))
-                        .lineLimit(1)
+                        .lineLimit(2)
+                        .truncationMode(.tail)
+                        .fixedSize(horizontal: false, vertical: true)
                     Text(detail)
                         .font(.system(size: 11))
                         .foregroundStyle(kind == .waiting ? AnyShapeStyle(tint) : AnyShapeStyle(.secondary))
                         .lineLimit(1)
                 }
-                Spacer(minLength: 4)
-                if hover {
-                    Image(systemName: "arrow.up.right").font(.system(size: 10, weight: .bold)).foregroundStyle(.secondary)
-                } else {
-                    Text(time).font(.system(size: 11, weight: .medium)).monospacedDigit().foregroundStyle(.tertiary)
+                Group {
+                    if hover {
+                        Image(systemName: "arrow.up.right").font(.system(size: 10, weight: .bold)).foregroundStyle(.secondary)
+                    } else {
+                        Text(time).font(.system(size: 11, weight: .medium)).monospacedDigit().foregroundStyle(.tertiary)
+                    }
                 }
+                .frame(width: 30, alignment: .trailing)
             }
             .padding(.horizontal, 12).padding(.vertical, 8)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1093,6 +1094,47 @@ struct SessionToast: View {
         .buttonStyle(.plain)
         .onHover { hover = $0 }
     }
+}
+
+/// A small dot that breathes while a session works. Driven by a timeline, not an
+/// implicit animation, so it never animates its position when the list changes.
+struct PulseDot: View {
+    let color: Color
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1.0 / 20)) { ctx in
+            let phase = (sin(ctx.date.timeIntervalSinceReferenceDate * 3.5) + 1) / 2
+            Circle().fill(color)
+                .frame(width: 8, height: 8)
+                .scaleEffect(0.6 + 0.4 * phase)
+                .opacity(0.45 + 0.55 * phase)
+        }
+    }
+}
+
+/// Opens the chat behind a card: the desktop chat itself, or the app running a terminal session.
+func openSession(_ s: SessionInfo) {
+    if let h = s.hostSessionId,
+       let id = h.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
+        openURL("claude://code/continue?session=\(id)&source=claude_pet")
+    } else if s.pid > 0, let app = owningApp(of: s.pid) {
+        app.activate()
+    } else {
+        activateClaude()
+    }
+}
+
+/// The nearest ancestor of a process that is a regular app (the terminal running `claude`).
+func owningApp(of pid: Int32) -> NSRunningApplication? {
+    var p = pid
+    for _ in 0..<12 where p > 1 {
+        if let app = NSRunningApplication(processIdentifier: p), app.activationPolicy == .regular { return app }
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, p]
+        guard sysctl(&mib, 4, &info, &size, nil, 0) == 0, size > 0 else { return nil }
+        p = info.kp_eproc.e_ppid
+    }
+    return nil
 }
 
 func openURL(_ s: String) {
@@ -1129,7 +1171,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)   // no Dock icon
         store.start()
 
-        panel = PetPanel(contentRect: NSRect(x: 0, y: 0, width: 284, height: 200),
+        panel = PetPanel(contentRect: NSRect(x: 0, y: 0, width: 304, height: 200),
                          styleMask: [.borderless, .nonactivatingPanel],
                          backing: .buffered, defer: false)
         panel.level = .floating

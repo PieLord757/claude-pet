@@ -10,7 +10,7 @@ It floats above every app and desktop and shows:
 
 - 🟠 **Needs you**: a session is blocked on a permission prompt or a question
 - 🔵 **Working**: Claude is busy in that session
-- 🟢 **Done**: a chat finished and you haven't read it yet. It matches the Claude sidebar's blue dots and clears when you read the chat (or click the card).
+- 🟢 **Done**: a chat finished and you haven't read it yet. It matches the Claude sidebar's blue dots; click the card to open the chat, and it clears once you've read it.
 
 The pet reacts too: it sleeps when nothing is running, gets busy while Claude works, and jumps when something finishes.
 
@@ -52,12 +52,10 @@ open ClaudePet.app
 | Click the pet, or the `⌄` in the pill | Show or hide the session cards |
 | Drag the pet | Move it (the position is remembered) |
 | ✎ in the pill | Start a new Claude Code session |
-| Click a **Needs you** card | Open Claude's "Sessions Waiting for You" view |
-| Click a **Working** card | Bring Claude to the front |
-| Click a **Done** card | Clear it and bring Claude to the front |
-| Right-click the pet | Choose a pet, import a pet, change size, show idle sessions, reset position, **Close Pet** |
+| Click a card | Open that chat in the Claude desktop app (for a terminal session, bring its terminal forward) |
+| Right-click the pet | Choose a pet, import a pet, change size, show idle sessions, clear finished, reset position, **Close Pet** |
 
-Clicking a card can't jump straight to that exact chat, because the Claude desktop app doesn't expose a link for it. PRs welcome if you find one.
+Cards open chats with the desktop app's own link, `claude://code/continue?session=<chat id>`. Opening a chat marks it read in Claude, so its **Done** card then goes away by itself.
 
 ### Opening and closing
 
@@ -126,7 +124,7 @@ Every running Claude Code session writes a small status file to `~/.claude/sessi
 - Only `*.json` files are read there. Nothing else in `~/.claude` is touched.
 - A session counts only while its process is alive (`kill(pid, 0)`).
 - A busy → idle change shows as **Done** after a 3 second debounce, and expires after 30 minutes.
-- For chats in the Claude desktop app, **Done** mirrors the app's own unread list (the sidebar's blue dots), so a card clears as soon as you read that chat in Claude, and unread chats show up even if their process has stopped or the pet was just started. The pet reads that list from the app's local storage log (`~/Library/Application Support/Claude/Local Storage/leveldb/*.log`, key `epitaxy-unread-v1`) and chat titles and times from `~/Library/Application Support/Claude/claude-code-sessions/`. If the list isn't available it falls back to comparing each chat's last turn with when you last opened it. Terminal sessions have no desktop chat, so they're done when the pet sees them finish, and clear when you click them.
+- For chats in the Claude desktop app, **Done** mirrors the app's own unread list (the sidebar's blue dots), so a card clears as soon as you read that chat in Claude, and unread chats show up even if their process has stopped or the pet was just started. The pet reads that list from the app's local storage log (`~/Library/Application Support/Claude/Local Storage/leveldb/*.log`, key `epitaxy-unread-v1`) and chat titles and times from `~/Library/Application Support/Claude/claude-code-sessions/`. If the list isn't available it falls back to comparing each chat's last turn with when you last opened it. Terminal sessions have no desktop chat, so they're done when the pet sees them finish, and clear after 30 minutes or with right-click → Clear Finished.
 - The app makes no network requests. It writes only its own preferences (`defaults read local.claudepet`) and the pets you import.
 
 ⚠️ These files are internal details of Claude Code and the desktop app, not documented APIs. A future update could change them and break the pet. If that happens, the parsing lives in `SessionStore`, `DesktopChats` and `DesktopUnread`.
