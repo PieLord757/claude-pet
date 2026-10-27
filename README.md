@@ -38,12 +38,19 @@ brew install --cask pielord757/tap/claude-pet
 
 Or download **[ClaudePet.zip](../../releases/latest)**, unzip it, and move `ClaudePet.app` to Applications.
 
-It isn't notarized yet, so the first time, right-click the app → **Open** → **Open** (or run `xattr -dr com.apple.quarantine /Applications/ClaudePet.app`). It works with the Claude desktop app's Code tab and with `claude` in a terminal. Apple Silicon, macOS 14 or newer.
+**First launch:** Claude Pet isn't notarized by Apple yet, so macOS says it "could not verify" the app and won't open it. To allow it once:
+
+- open **System Settings → Privacy & Security**, scroll to *"ClaudePet" was blocked*, and click **Open Anyway**, or
+- run `xattr -dr com.apple.quarantine /Applications/ClaudePet.app` in Terminal.
+
+(On macOS 15 and later, right-click → Open no longer skips this check.) The code is all in this repo if you'd rather [build it yourself](#build-from-source).
+
+It works with the Claude desktop app's Code tab and with `claude` in a terminal. Apple Silicon, macOS 14 or newer.
 
 Update with `brew upgrade --cask claude-pet`.
 
 <details>
-<summary><b>Build from source</b> (one command, no Xcode project, no dependencies)</summary>
+<summary id="build-from-source"><b>Build from source</b> (one command, no Xcode project, no dependencies)</summary>
 
 You need Xcode or just the Command Line Tools (`xcode-select --install`).
 
