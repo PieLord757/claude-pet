@@ -33,3 +33,9 @@ Everything is in [`Sources/main.swift`](Sources/main.swift). [docs/HOW-IT-WORKS.
 - If you change how sessions are read, add a check to `SelfTest`.
 - Include a screenshot or GIF for anything visual.
 - Never commit real session data, chat titles, or anything from your own `~/.claude` or `~/Library` folders.
+
+## Releasing (maintainers)
+
+1. Bump `CFBundleShortVersionString` in `build.sh`, run `./build.sh`, and zip with `ditto -c -k --keepParent ClaudePet.app ClaudePet.zip`.
+2. `gh release create vX.Y.Z ClaudePet.zip --title ... --notes ...`
+3. Update the Homebrew cask in [PieLord757/homebrew-tap](https://github.com/PieLord757/homebrew-tap): set `version` and `sha256` (`shasum -a 256 ClaudePet.zip`) in `Casks/claude-pet.rb`.

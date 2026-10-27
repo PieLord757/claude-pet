@@ -30,10 +30,17 @@ Click a card to jump straight into that chat. The pet reacts too: it naps when n
 
 ## Install
 
-1. Download **[ClaudePet.zip](../../releases/latest)**, unzip it, and move `ClaudePet.app` to Applications.
-2. It isn't notarized yet, so the first time, right-click the app → **Open** → **Open** (or run `xattr -dr com.apple.quarantine /Applications/ClaudePet.app`).
+With [Homebrew](https://brew.sh):
 
-That's it. It works with the Claude desktop app's Code tab and with `claude` in a terminal. Apple Silicon, macOS 14 or newer.
+```bash
+brew install --cask pielord757/tap/claude-pet
+```
+
+Or download **[ClaudePet.zip](../../releases/latest)**, unzip it, and move `ClaudePet.app` to Applications.
+
+It isn't notarized yet, so the first time, right-click the app → **Open** → **Open** (or run `xattr -dr com.apple.quarantine /Applications/ClaudePet.app`). It works with the Claude desktop app's Code tab and with `claude` in a terminal. Apple Silicon, macOS 14 or newer.
+
+Update with `brew upgrade --cask claude-pet`.
 
 <details>
 <summary><b>Build from source</b> (one command, no Xcode project, no dependencies)</summary>
