@@ -1,0 +1,26 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check the tag matches VERSION
+        run: test "v$(cat VERSION)" = "$GITHUB_REF_NAME"
+      - name: Build and self-test
+        run: ./build.sh
+      - name: Package
+        run: ditto -c -k --keepParent ClaudePet.app ClaudePet.zip
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" ClaudePet.zip --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" ClaudePet.zip --title "Claude Pet $GITHUB_REF_NAME" --generate-notes
+          fi

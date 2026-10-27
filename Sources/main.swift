@@ -4,9 +4,12 @@
 // working, waiting on you, or just finished.
 
 import AppKit
+import Combine
 import ImageIO
+import ServiceManagement
 import SwiftUI
 import UniformTypeIdentifiers
+import UserNotifications
 
 // MARK: - Session model
 
@@ -22,6 +25,7 @@ struct SessionInfo: Identifiable, Equatable {
     let waitingFor: String?
     let statusUpdatedAt: Date
     let hostSessionId: String?
+    var peek: TranscriptPeek? = nil   // what the chat's transcript says it's doing
 }
 
 struct RawSession: Decodable {
@@ -45,6 +49,7 @@ struct DesktopChat: Equatable {
     let lastActivityAt: Double?     // ms
     let lastFocusedAt: Double?      // ms
     let isArchived: Bool
+    var cliSessionId: String? = nil
 }
 
 /// Reads the desktop app's per-chat files (<account>/<org>/local_<id>.json),
@@ -81,7 +86,8 @@ final class DesktopChats {
                                            lastTurnEdgeAt: (json["lastTurnEdgeAt"] as? NSNumber)?.doubleValue,
                                            lastActivityAt: (json["lastActivityAt"] as? NSNumber)?.doubleValue,
                                            lastFocusedAt: (json["lastFocusedAt"] as? NSNumber)?.doubleValue,
-                                           isArchived: (json["isArchived"] as? Bool) ?? false)
+                                           isArchived: (json["isArchived"] as? Bool) ?? false,
+                                           cliSessionId: json["cliSessionId"] as? String)
                     cache[f.path] = (modified, chat)
                     out[hostId] = chat
                 }
@@ -237,6 +243,110 @@ final class DesktopUnread {
     }
 }
 
+/// What a chat's transcript says: the latest tool Claude used, and the first line of its latest reply.
+struct TranscriptPeek: Equatable {
+    var activity: String?
+    var lastReply: String?
+}
+
+/// Reads the end of each chat's transcript (~/.claude/projects/<project>/<sessionId>.jsonl),
+/// only when the file has grown.
+final class Transcripts {
+    let projectsDir: URL
+    private var paths: [String: URL] = [:]
+    private var missing: [String: Date] = [:]          // don't rescan for a missing file every second
+    private var cache: [String: (size: Int, peek: TranscriptPeek)] = [:]
+    static let tailBytes = 160_000
+
+    init(projectsDir: URL) { self.projectsDir = projectsDir }
+
+    func peek(sessionId: String) -> TranscriptPeek? {
+        guard let url = path(for: sessionId),
+              let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize else { return nil }
+        if let c = cache[sessionId], c.size == size { return c.peek }
+        guard let h = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? h.close() }
+        try? h.seek(toOffset: UInt64(max(0, size - Self.tailBytes)))
+        let peek = Self.parse(tail: (try? h.readToEnd()) ?? Data(), fromStart: size <= Self.tailBytes)
+        cache[sessionId] = (size, peek)
+        return peek
+    }
+
+    private func path(for sessionId: String) -> URL? {
+        if let u = paths[sessionId] { return u }
+        if let t = missing[sessionId], Date().timeIntervalSince(t) < 30 { return nil }
+        let name = sessionId + ".jsonl"
+        for dir in (try? FileManager.default.contentsOfDirectory(at: projectsDir, includingPropertiesForKeys: nil)) ?? [] {
+            let u = dir.appendingPathComponent(name)
+            if FileManager.default.fileExists(atPath: u.path) { paths[sessionId] = u; return u }
+        }
+        missing[sessionId] = Date()
+        return nil
+    }
+
+    /// Walks the transcript's last lines backwards for the newest tool call and text reply.
+    static func parse(tail: Data, fromStart: Bool) -> TranscriptPeek {
+        var lines = tail.split(separator: UInt8(ascii: "\n"))
+        if !fromStart, !lines.isEmpty { lines.removeFirst() }      // probably cut mid-line
+        var peek = TranscriptPeek()
+        for line in lines.reversed() {
+            guard let obj = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
+                  obj["type"] as? String == "assistant", (obj["isSidechain"] as? Bool) != true,
+                  let message = obj["message"] as? [String: Any],
+                  let blocks = message["content"] as? [[String: Any]] else { continue }
+            for b in blocks.reversed() {
+                if peek.activity == nil, b["type"] as? String == "tool_use", let name = b["name"] as? String {
+                    peek.activity = describe(tool: name, input: b["input"] as? [String: Any] ?? [:])
+                }
+                if peek.lastReply == nil, b["type"] as? String == "text", let text = b["text"] as? String,
+                   let first = text.split(whereSeparator: \.isNewline).map({ $0.trimmingCharacters(in: .whitespaces) })
+                       .first(where: { !$0.isEmpty }) {
+                    peek.lastReply = clip(plain(first), 140)
+                }
+            }
+            if peek.activity != nil && peek.lastReply != nil { break }
+        }
+        return peek
+    }
+
+    static func describe(tool: String, input: [String: Any]) -> String {
+        func file(_ key: String = "file_path") -> String {
+            (input[key] as? String).map { URL(fileURLWithPath: $0).lastPathComponent } ?? "a file"
+        }
+        switch tool {
+        case "Bash":
+            let cmd = (input["description"] as? String) ?? (input["command"] as? String).map { "Running " + $0 }
+            return clip(cmd?.split(whereSeparator: \.isNewline).first.map(String.init) ?? "Running a command", 80)
+        case "Edit", "MultiEdit", "Write": return "Editing " + file()
+        case "NotebookEdit": return "Editing " + file("notebook_path")
+        case "Read": return "Reading " + file()
+        case "Grep", "Glob": return "Searching the code"
+        case "WebSearch": return "Searching the web"
+        case "WebFetch": return "Reading " + ((input["url"] as? String).flatMap { URL(string: $0)?.host } ?? "a web page")
+        case "Agent", "Task": return "Running a subagent"
+        case "AskUserQuestion": return "Asking you a question"
+        default:
+            let parts = tool.components(separatedBy: "__")
+            if parts.count >= 3, parts[0] == "mcp" {
+                let name = parts.last!.replacingOccurrences(of: "_", with: " ").replacingOccurrences(of: "-", with: " ")
+                return clip("Using \(name) (\(parts[1]))", 80)
+            }
+            return "Using " + tool
+        }
+    }
+
+    /// Markdown to plain text for a one-line card: links keep their text; emphasis, code ticks
+    /// and heading or list markers go.
+    static func plain(_ s: String) -> String {
+        var t = s.replacingOccurrences(of: #"\[([^\]]*)\]\([^)]*\)"#, with: "$1", options: .regularExpression)
+        t = t.replacingOccurrences(of: #"^(#{1,6}\s+|[-*+]\s+|\d+\.\s+|>\s*)"#, with: "", options: .regularExpression)
+        for mark in ["**", "__", "`"] { t = t.replacingOccurrences(of: mark, with: "") }
+        return t.trimmingCharacters(in: .whitespaces)
+    }
+
+    static func clip(_ s: String, _ n: Int) -> String { s.count > n ? String(s.prefix(n - 1)) + "…" : s }
+}
+
 final class SessionStore: ObservableObject {
     @Published var sessions: [SessionInfo] = []
     /// id -> when it finished, for every session shown as done.
@@ -248,6 +358,7 @@ final class SessionStore: ObservableObject {
     let sessionsDir: URL
     let desktop: DesktopChats
     let unread: DesktopUnread
+    let transcripts: Transcripts
     var now: () -> Date = Date.init                   // replaceable in tests
 
     private var lastGood: [String: RawSession] = [:]       // file name -> last decodable contents
@@ -260,7 +371,8 @@ final class SessionStore: ObservableObject {
     static let doneDebounce: TimeInterval = 3
     static let doneExpiry: TimeInterval = 30 * 60
 
-    init(sessionsDir: URL? = nil, desktopDir: URL? = nil, leveldbDir: URL? = nil, defaults: UserDefaults = .standard) {
+    init(sessionsDir: URL? = nil, desktopDir: URL? = nil, leveldbDir: URL? = nil, projectsDir: URL? = nil,
+         defaults: UserDefaults = .standard) {
         let env = ProcessInfo.processInfo.environment
         let home = FileManager.default.homeDirectoryForCurrentUser
         let claude = home.appendingPathComponent("Library/Application Support/Claude")
@@ -270,6 +382,8 @@ final class SessionStore: ObservableObject {
             ?? claude.appendingPathComponent("claude-code-sessions"))
         unread = DesktopUnread(leveldbDir: leveldbDir ?? env["CLAUDE_PET_LEVELDB_DIR"].map { URL(fileURLWithPath: $0) }
             ?? claude.appendingPathComponent("Local Storage/leveldb"), defaults: defaults)
+        transcripts = Transcripts(projectsDir: projectsDir ?? env["CLAUDE_PET_PROJECTS_DIR"].map { URL(fileURLWithPath: $0) }
+            ?? home.appendingPathComponent(".claude/projects"))
     }
 
     func start() {
@@ -417,6 +531,13 @@ final class SessionStore: ObservableObject {
             if rank(a) != rank(b) { return rank(a) < rank(b) }
             return a.statusUpdatedAt > b.statusUpdatedAt
         }
+        // What each visible chat is doing, from the end of its transcript.
+        for i in result.indices where result[i].state != .idle || newFinished[result[i].id] != nil || idleSince[result[i].id] != nil {
+            let s = result[i]
+            let transcriptId = s.pid == 0 ? s.hostSessionId.flatMap { desktopChats[$0]?.cliSessionId } : s.id
+            result[i].peek = transcriptId.flatMap { transcripts.peek(sessionId: $0) }
+        }
+
         if result != sessions { sessions = result }
         if newFinished != finished { finished = newFinished }
         let newSettling = Set(idleSince.keys)
@@ -851,6 +972,7 @@ struct PetView: View {
     @AppStorage("expanded") private var expanded = true
     @AppStorage("showIdle") private var showIdle = false
     @AppStorage("petScale") private var petScale = 1.0
+    @AppStorage("seenTips") private var seenTips = false
     @State private var frame = 0
     @State private var cheerUntil: Date = .distantPast
     @State private var lastDoneCount = 0
@@ -874,6 +996,11 @@ struct PetView: View {
                 .help("Click to show or hide sessions · drag to move · right-click for options")
 
             ControlPill(store: store, expanded: $expanded)
+
+            if !seenTips {
+                TipsCard { withAnimation(.snappy) { seenTips = true } }
+                    .transition(.opacity)
+            }
 
             if expanded {
                 SessionStack(store: store, showIdle: showIdle, second: frame / 8)
@@ -977,6 +1104,7 @@ struct SessionStack: View {
     @ObservedObject var store: SessionStore
     let showIdle: Bool
     let second: Int          // changes every second so the times on the cards tick
+    @ObservedObject var stats = Stats.shared
     static let maxCards = 5
 
     struct Item: Identifiable {
@@ -989,12 +1117,19 @@ struct SessionStack: View {
 
     var items: [Item] {
         var out: [Item] = []
-        out += store.waiting.map { Item(session: $0, kind: .waiting,
-                                        detail: $0.waitingFor.map { "Needs you · \($0)" } ?? "Needs you",
-                                        time: ago($0.statusUpdatedAt)) }
-        out += store.busy.map { Item(session: $0, kind: .busy, detail: "Working", time: ago($0.statusUpdatedAt)) }
-        out += store.done.map { Item(session: $0, kind: .done, detail: "Finished",
-                                     time: ago(store.finished[$0.id] ?? $0.statusUpdatedAt)) }
+        let details = UserDefaults.standard.object(forKey: "showDetails") as? Bool ?? true
+        out += store.waiting.map { s in
+            let what = (details ? s.peek?.activity : nil) ?? s.waitingFor
+            return Item(session: s, kind: .waiting, detail: what.map { "Needs you · \($0)" } ?? "Needs you",
+                        time: ago(s.statusUpdatedAt))
+        }
+        out += store.busy.map { s in
+            Item(session: s, kind: .busy, detail: (details ? s.peek?.activity : nil) ?? "Working", time: ago(s.statusUpdatedAt))
+        }
+        out += store.done.map { s in
+            Item(session: s, kind: .done, detail: (details ? s.peek?.lastReply : nil) ?? "Finished",
+                 time: ago(store.finished[s.id] ?? s.statusUpdatedAt))
+        }
         if showIdle {
             out += store.sessions.filter { $0.state == .idle && store.finished[$0.id] == nil && !store.settling.contains($0.id) }
                 .map { Item(session: $0, kind: .idle, detail: "Idle", time: ago($0.statusUpdatedAt)) }
@@ -1023,6 +1158,11 @@ struct SessionStack: View {
                         .font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
+            }
+            if stats.today > 0 {
+                Text(stats.today == 1 ? "🎉 1 chat finished today" : "🎉 \(stats.today) chats finished today")
+                    .font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
+                    .padding(.top, 2)
             }
         }
     }
@@ -1176,6 +1316,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var panel: PetPanel!
     let store = SessionStore()
     let library = PetLibrary()
+    lazy var alerts = Alerts(store: store)
+    static var openOnLaunch: String?
 
     func applicationDidFinishLaunching(_ note: Notification) {
         // One pet at a time.
@@ -1187,6 +1329,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         NSApp.setActivationPolicy(.accessory)   // no Dock icon
         store.start()
+        alerts.start()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { Updater.shared.checkIfDue() }
+        let updates = Timer(timeInterval: 6 * 3600, repeats: true) { _ in Updater.shared.checkIfDue() }
+        RunLoop.main.add(updates, forMode: .common)
 
         panel = PetPanel(contentRect: NSRect(x: 0, y: 0, width: 304, height: 200),
                          styleMask: [.borderless, .nonactivatingPanel],
@@ -1214,6 +1360,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             resetPosition()
         }
         panel.orderFrontRegardless()
+
+        // `ClaudePet --settings` / `--browse-pets` from another process opens that window here.
+        DistributedNotificationCenter.default().addObserver(forName: .init("local.claudepet.open"), object: nil,
+                                                            queue: .main) { [weak self] note in
+            self?.openWindow(note.object as? String)
+        }
+        if let w = Self.openOnLaunch { DispatchQueue.main.async { self.openWindow(w) } }
 
         // Keep the pet on screen: displays come and go, and nothing should leave it hidden.
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
@@ -1262,6 +1415,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return i
         }
 
+        if let v = Updater.shared.latest {
+            menu.addItem(item("Update to \(v)…", #selector(getUpdate)))
+            menu.addItem(.separator())
+        }
+        menu.addItem(item("Settings…", #selector(openSettings)))
+        menu.addItem(.separator())
+
         let pets = NSMenu()
         for p in library.pets {
             pets.addItem(item(p.name, #selector(choosePet(_:)), state: p.id == library.selectedId, object: p.id))
@@ -1269,6 +1429,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let petItem = NSMenuItem(title: "Pet", action: nil, keyEquivalent: "")
         petItem.submenu = pets
         menu.addItem(petItem)
+        menu.addItem(item("Browse Pets…", #selector(browsePets)))
         menu.addItem(item("Import Pet…", #selector(importPet)))
         menu.addItem(item("Open Pets Folder", #selector(openPetsFolder)))
         menu.addItem(item("Reload Pets", #selector(reloadPets)))
@@ -1286,6 +1447,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let expanded = d.object(forKey: "expanded") as? Bool ?? true
         menu.addItem(item(expanded ? "Hide Sessions" : "Show Sessions", #selector(toggleExpanded)))
         menu.addItem(item("Clear Finished", #selector(clearFinished)))
+        menu.addItem(item("Save Pet Card…", #selector(petCard)))
         menu.addItem(item("Reset Position", #selector(resetPositionAction)))
         menu.addItem(.separator())
         menu.addItem(item("Close Pet", #selector(closePet)))
@@ -1294,6 +1456,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func choosePet(_ sender: NSMenuItem) { if let id = sender.representedObject as? String { library.selectedId = id } }
     @objc func importPet() { library.importPet() }
+    func openWindow(_ which: String?) {
+        switch which {
+        case "--settings": openSettings()
+        case "--browse-pets": browsePets()
+        default: break
+        }
+    }
+
+    @objc func openSettings() { SettingsWindow.shared.show(store: store, library: library) }
+    @objc func browsePets() { BrowsePetsWindow.shared.show(library: library) }
+    @MainActor @objc func petCard() { savePetCard(pet: library.selected) }
+    @objc func getUpdate() { Updater.shared.openUpdate() }
     @objc func openPetsFolder() { library.openFolder() }
     @objc func reloadPets() { library.reload() }
     @objc func chooseSize(_ sender: NSMenuItem) { if let v = sender.representedObject as? Double { UserDefaults.standard.set(v, forKey: "petScale") } }
@@ -1339,6 +1513,647 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let v = NSScreen.main?.visibleFrame {
             place(topLeft: NSPoint(x: v.maxX - panel.frame.width - 16, y: v.maxY - 12))
         }
+    }
+}
+
+// MARK: - Alerts and stats
+
+/// Turns store changes into sounds, notifications and the finished-today count.
+/// Every alert is off until turned on in Settings.
+final class Alerts: NSObject, UNUserNotificationCenterDelegate {
+    let store: SessionStore
+    private var seenWaiting: Set<String>?
+    private var seenDone: Set<String>?
+    private var cancellable: AnyCancellable?
+
+    init(store: SessionStore) { self.store = store }
+
+    func start() {
+        UNUserNotificationCenter.current().delegate = self
+        // @Published sends the new values before the properties change, so use the values it sends.
+        cancellable = Publishers.CombineLatest(store.$sessions, store.$finished)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] sessions, finished in self?.update(sessions: sessions, finished: finished) }
+    }
+
+    /// The ids that just started waiting or just finished, given what was seen before.
+    /// The first call only records what's there, so nothing fires at launch.
+    static func diff(seen: Set<String>?, now: Set<String>) -> Set<String> {
+        guard let seen else { return [] }
+        return now.subtracting(seen)
+    }
+
+    private func update(sessions: [SessionInfo], finished: [String: Date]) {
+        let waiting = Set(sessions.filter { $0.state == .waiting }.map(\.id))
+        let done = Set(finished.keys)
+        let newWaiting = Self.diff(seen: seenWaiting, now: waiting)
+        let newDone = Self.diff(seen: seenDone, now: done)
+        seenWaiting = waiting
+        seenDone = done
+        let d = UserDefaults.standard
+
+        if !newWaiting.isEmpty {
+            if d.bool(forKey: "soundNeedsYou") { NSSound(named: "Ping")?.play() }
+            if d.bool(forKey: "notifyNeedsYou") {
+                for s in sessions where newWaiting.contains(s.id) {
+                    notify(s, title: s.name, body: "Needs you" + ((s.peek?.activity ?? s.waitingFor).map { " · \($0)" } ?? ""))
+                }
+            }
+        }
+        if !newDone.isEmpty {
+            Stats.shared.recordFinished(newDone.count)
+            if d.bool(forKey: "soundDone") { NSSound(named: "Glass")?.play() }
+            if d.bool(forKey: "notifyDone") {
+                for s in sessions where newDone.contains(s.id) {
+                    notify(s, title: s.name, body: s.peek?.lastReply ?? "Finished")
+                }
+            }
+        }
+    }
+
+    private func notify(_ s: SessionInfo, title: String, body: String) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.userInfo = ["id": s.id]
+        let request = UNNotificationRequest(identifier: "\(s.id)-\(Date().timeIntervalSince1970)", content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request)
+    }
+
+    static func requestPermission() {
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
+                                withCompletionHandler done: @escaping (UNNotificationPresentationOptions) -> Void) {
+        done([.banner, .sound])
+    }
+
+    /// Clicking a notification opens that chat, like clicking its card.
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
+                                withCompletionHandler done: @escaping () -> Void) {
+        let id = response.notification.request.content.userInfo["id"] as? String
+        DispatchQueue.main.async { [store] in
+            if let s = store.sessions.first(where: { $0.id == id }) {
+                store.markOpened(s)
+                openSession(s)
+            } else {
+                activateClaude()
+            }
+        }
+        done()
+    }
+}
+
+/// Chats finished today and in total, counted while the pet runs.
+final class Stats: ObservableObject {
+    static let shared = Stats()
+    @Published private(set) var today = 0
+    @Published private(set) var total = 0
+    private let d = UserDefaults.standard
+
+    private static func dayKey(_ date: Date = Date()) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        return f.string(from: date)
+    }
+
+    init() { refresh() }
+
+    func refresh() {
+        today = d.string(forKey: "statsDay") == Self.dayKey() ? d.integer(forKey: "statsToday") : 0
+        total = d.integer(forKey: "statsTotal")
+    }
+
+    func recordFinished(_ n: Int) {
+        let key = Self.dayKey()
+        let base = d.string(forKey: "statsDay") == key ? d.integer(forKey: "statsToday") : 0
+        d.set(key, forKey: "statsDay")
+        d.set(base + n, forKey: "statsToday")
+        d.set(d.integer(forKey: "statsTotal") + n, forKey: "statsTotal")
+        refresh()
+    }
+}
+
+// MARK: - Updates
+
+/// Checks GitHub once a day for a newer release (Settings can turn this off).
+final class Updater: ObservableObject {
+    static let shared = Updater()
+    static let repo = "PieLord757/claude-pet"
+    @Published var latest: String?          // a newer version, when there is one
+    @Published var status = ""
+
+    var current: String { Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0" }
+
+    static func isNewer(_ a: String, than b: String) -> Bool {
+        func parts(_ v: String) -> [Int] {
+            v.trimmingCharacters(in: CharacterSet(charactersIn: "v")).split(separator: ".").map { Int($0) ?? 0 }
+        }
+        let x = parts(a), y = parts(b)
+        for i in 0..<max(x.count, y.count) {
+            let p = i < x.count ? x[i] : 0, q = i < y.count ? y[i] : 0
+            if p != q { return p > q }
+        }
+        return false
+    }
+
+    func checkIfDue() {
+        let d = UserDefaults.standard
+        guard d.object(forKey: "checkUpdates") as? Bool ?? true else { return }
+        let last = d.double(forKey: "lastUpdateCheck")
+        if Date().timeIntervalSince1970 - last > 24 * 3600 { check() }
+    }
+
+    func check() {
+        status = "Checking…"
+        var req = URLRequest(url: URL(string: "https://api.github.com/repos/\(Self.repo)/releases/latest")!)
+        req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        req.timeoutInterval = 15
+        URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
+            let tag = (data.flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any])?["tag_name"] as? String
+            DispatchQueue.main.async {
+                guard let self else { return }
+                UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "lastUpdateCheck")
+                guard let tag else { self.status = "Couldn't reach GitHub."; return }
+                let version = tag.trimmingCharacters(in: CharacterSet(charactersIn: "v"))
+                if Self.isNewer(version, than: self.current) {
+                    self.latest = version
+                    self.status = "Version \(version) is available."
+                } else {
+                    self.latest = nil
+                    self.status = "You're up to date (\(self.current))."
+                }
+            }
+        }.resume()
+    }
+
+    static var installedWithHomebrew: Bool {
+        ["/opt/homebrew/Caskroom/claude-pet", "/usr/local/Caskroom/claude-pet"].contains { FileManager.default.fileExists(atPath: $0) }
+    }
+
+    /// Homebrew installs update with brew; others get the release page.
+    func openUpdate() {
+        if Self.installedWithHomebrew {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString("brew upgrade --cask claude-pet", forType: .string)
+            NSApp.activate()
+            let a = NSAlert()
+            a.messageText = "Update Claude Pet"
+            a.informativeText = "Run this in Terminal (it's on your clipboard):\n\nbrew upgrade --cask claude-pet"
+            a.runModal()
+            NSApp.deactivate()
+        } else {
+            openURL("https://github.com/\(Self.repo)/releases/latest")
+        }
+    }
+}
+
+// MARK: - Pet card
+
+/// A shareable card: your pet, today's count, and where to get it.
+struct PetCardView: View {
+    let pet: PetEntry
+    let today: Int
+    let total: Int
+
+    var body: some View {
+        HStack(spacing: 28) {
+            PetFigure(pet: pet, mood: .cheering, frame: 0, dragDir: 0, scale: 1.7)
+                .frame(width: 190, height: 210)
+            VStack(alignment: .leading, spacing: 10) {
+                Text(pet.name).font(.system(size: 18, weight: .semibold, design: .rounded)).foregroundStyle(.white.opacity(0.75))
+                Text(today == 1 ? "1 chat finished today" : "\(today) chats finished today")
+                    .font(.system(size: 34, weight: .bold, design: .rounded)).foregroundStyle(.white)
+                Text("\(total) all time · \(Date().formatted(date: .abbreviated, time: .omitted))")
+                    .font(.system(size: 15, weight: .medium)).foregroundStyle(.white.opacity(0.7))
+                Spacer().frame(height: 10)
+                Text("Claude Pet · github.com/\(Updater.repo)")
+                    .font(.system(size: 13, weight: .medium, design: .monospaced)).foregroundStyle(.white.opacity(0.6))
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(36)
+        .frame(width: 720, height: 300)
+        .background(LinearGradient(colors: [Color(red: 0.29, green: 0.22, blue: 0.52), Color(red: 0.12, green: 0.10, blue: 0.27)],
+                                   startPoint: .top, endPoint: .bottom))
+    }
+}
+
+@MainActor
+func savePetCard(pet: PetEntry) {
+    let stats = Stats.shared
+    stats.refresh()
+    let renderer = ImageRenderer(content: PetCardView(pet: pet, today: stats.today, total: stats.total))
+    renderer.scale = 2
+    guard let cg = renderer.cgImage,
+          let png = NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:]) else { return }
+    let panel = NSSavePanel()
+    panel.allowedContentTypes = [.png]
+    let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"
+    panel.nameFieldStringValue = "claude-pet-\(f.string(from: Date())).png"
+    NSApp.activate()
+    if panel.runModal() == .OK, let url = panel.url { try? png.write(to: url) }
+    if SettingsWindow.shared.window?.isVisible != true { NSApp.deactivate() }
+}
+
+// MARK: - Settings window
+
+final class SettingsWindow: NSObject, NSWindowDelegate {
+    static let shared = SettingsWindow()
+    var window: NSWindow?
+
+    func show(store: SessionStore, library: PetLibrary) {
+        if window == nil {
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 640),
+                             styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+            w.title = "Claude Pet Settings"
+            w.isReleasedWhenClosed = false
+            w.contentView = NSHostingView(rootView: SettingsView(store: store, library: library))
+            w.delegate = self
+            w.center()
+            window = w
+        }
+        NSApp.activate()
+        window?.makeKeyAndOrderFront(nil)
+    }
+
+    func windowWillClose(_ notification: Notification) { NSApp.deactivate() }
+}
+
+struct SettingsView: View {
+    @ObservedObject var store: SessionStore
+    @ObservedObject var library: PetLibrary
+    @ObservedObject var stats = Stats.shared
+    @ObservedObject var updater = Updater.shared
+    @AppStorage("petScale") private var petScale = 1.0
+    @AppStorage("showDetails") private var showDetails = true
+    @AppStorage("showIdle") private var showIdle = false
+    @AppStorage("soundNeedsYou") private var soundNeedsYou = false
+    @AppStorage("soundDone") private var soundDone = false
+    @AppStorage("notifyNeedsYou") private var notifyNeedsYou = false
+    @AppStorage("notifyDone") private var notifyDone = false
+    @AppStorage("checkUpdates") private var checkUpdates = true
+    @State private var openAtLogin = SMAppService.mainApp.status == .enabled
+    @State private var loginError: String?
+
+    var body: some View {
+        Form {
+            Section("Pet") {
+                Picker("Pet", selection: $library.selectedId) {
+                    ForEach(library.pets) { Text($0.name).tag($0.id) }
+                }
+                Picker("Size", selection: $petScale) {
+                    Text("Small").tag(0.8)
+                    Text("Medium").tag(1.0)
+                    Text("Large").tag(1.25)
+                }
+                HStack {
+                    Button("Browse Pets…") { BrowsePetsWindow.shared.show(library: library) }
+                    Button("Import Pet…") { library.importPet() }
+                    Button("Open Pets Folder") { library.openFolder() }
+                }
+            }
+            Section {
+                Toggle("Show what each chat is doing", isOn: $showDetails)
+                Toggle("Show idle sessions", isOn: $showIdle)
+            } header: {
+                Text("Cards")
+            } footer: {
+                Text("Shows the latest step or reply from each chat. Turn it off if you share your screen.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Alerts") {
+                Toggle("Play a sound when a chat needs you", isOn: $soundNeedsYou)
+                Toggle("Play a sound when a chat finishes", isOn: $soundDone)
+                Toggle("Notify me when a chat needs you", isOn: $notifyNeedsYou)
+                    .onChange(of: notifyNeedsYou) { _, on in if on { Alerts.requestPermission() } }
+                Toggle("Notify me when a chat finishes", isOn: $notifyDone)
+                    .onChange(of: notifyDone) { _, on in if on { Alerts.requestPermission() } }
+            }
+            Section("General") {
+                Toggle("Open at login", isOn: $openAtLogin)
+                    .onChange(of: openAtLogin) { _, on in
+                        do {
+                            if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
+                            loginError = nil
+                        } catch {
+                            loginError = "macOS didn't allow it: \(error.localizedDescription) You can add Claude Pet in System Settings → General → Login Items."
+                            openAtLogin = SMAppService.mainApp.status == .enabled
+                        }
+                    }
+                if let loginError { Text(loginError).font(.caption).foregroundStyle(.secondary) }
+                Toggle("Check for updates automatically", isOn: $checkUpdates)
+                HStack {
+                    Button("Check Now") { updater.check() }
+                    if updater.latest != nil { Button("Get Update") { updater.openUpdate() } }
+                    Text(updater.status).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Section("Today") {
+                LabeledContent("Chats finished today", value: "\(stats.today)")
+                LabeledContent("All time", value: "\(stats.total)")
+                Button("Save Pet Card…") { savePetCard(pet: library.selected) }
+            }
+            Section {
+                LabeledContent("Version", value: updater.current)
+                Link("Claude Pet on GitHub", destination: URL(string: "https://github.com/\(Updater.repo)")!)
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: 480, height: 640)
+        .onAppear { stats.refresh(); openAtLogin = SMAppService.mainApp.status == .enabled }
+    }
+}
+
+/// Shown under the pet until dismissed: how to use it.
+struct TipsCard: View {
+    let dismiss: () -> Void
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Hi! I'm your Claude Pet 👋").font(.system(size: 12.5, weight: .semibold))
+            VStack(alignment: .leading, spacing: 3) {
+                Text("• Click me to show or hide your chats")
+                Text("• Drag me anywhere on screen")
+                Text("• Right-click for pets and Settings")
+            }
+            .font(.system(size: 11.5)).foregroundStyle(.secondary)
+            HStack {
+                Spacer()
+                Button("Got it", action: dismiss)
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .padding(.horizontal, 10).padding(.vertical, 4)
+                    .foregroundStyle(.white)
+                    .background(Theme.clay, in: Capsule())
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .card(radius: 14)
+    }
+}
+
+// MARK: - Pet gallery
+
+/// One pet in the community gallery (`pets/index.json` in the repo).
+struct GalleryPet: Decodable, Identifiable, Equatable {
+    let id: String
+    let displayName: String
+    let description: String?
+    let author: String?
+    let spritesheetPath: String     // relative to pets/<id>/
+    let preview: String?            // relative to pets/<id>/
+}
+
+final class Gallery: ObservableObject {
+    /// CLAUDE_PET_GALLERY_URL points at another gallery (a file:// folder works, for testing).
+    static var base: URL {
+        ProcessInfo.processInfo.environment["CLAUDE_PET_GALLERY_URL"].flatMap(URL.init(string:))
+            ?? URL(string: "https://raw.githubusercontent.com/\(Updater.repo)/main/pets/")!
+    }
+    @Published var pets: [GalleryPet] = []
+    @Published var status = ""
+    @Published var installing: String?
+
+    func load() {
+        status = "Loading the gallery…"
+        URLSession.shared.dataTask(with: Self.base.appendingPathComponent("index.json")) { [weak self] data, _, _ in
+            let list = data.flatMap { try? JSONDecoder().decode([GalleryPet].self, from: $0) }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.pets = list ?? []
+                self.status = list == nil ? "Couldn't load the gallery. Check your connection." : ""
+            }
+        }.resume()
+    }
+
+    func previewURL(_ p: GalleryPet) -> URL {
+        Self.base.appendingPathComponent(p.id).appendingPathComponent(p.preview ?? p.spritesheetPath)
+    }
+
+    /// Fetches a gallery pet's files and saves them to `dest`. Calls back on the main queue
+    /// with nil on success or a message.
+    static func download(_ p: GalleryPet, from base: URL, to dest: URL, done: @escaping (String?) -> Void) {
+        let folder = base.appendingPathComponent(p.id)
+        let group = DispatchGroup()
+        var files: [String: Data] = [:]
+        let lock = NSLock()
+        for name in ["pet.json", p.spritesheetPath] {
+            group.enter()
+            URLSession.shared.dataTask(with: folder.appendingPathComponent(name)) { data, response, _ in
+                let ok = (response as? HTTPURLResponse).map { $0.statusCode == 200 } ?? true
+                if let data, ok { lock.lock(); files[name] = data; lock.unlock() }
+                group.leave()
+            }.resume()
+        }
+        group.notify(queue: .main) {
+            guard files.count == 2 else { return done("Couldn't download \(p.displayName).") }
+            do {
+                try FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
+                for (name, data) in files { try data.write(to: dest.appendingPathComponent(name)) }
+                done(nil)
+            } catch {
+                done("Couldn't save \(p.displayName): \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Downloads the pet into the imported-pets folder and selects it.
+    func install(_ p: GalleryPet, into library: PetLibrary) {
+        installing = p.id
+        Self.download(p, from: Self.base, to: PetLibrary.importDir.appendingPathComponent(p.id)) { [weak self] problem in
+            guard let self else { return }
+            self.installing = nil
+            if let problem { self.status = problem; return }
+            library.reload()
+            let id = "local:\(p.id)"
+            if library.pets.contains(where: { $0.id == id }) {
+                library.selectedId = id
+                self.status = "\(p.displayName) is now your pet."
+            } else {
+                self.status = "\(p.displayName) downloaded, but its sprite sheet couldn't be read."
+            }
+        }
+    }
+}
+
+final class BrowsePetsWindow: NSObject, NSWindowDelegate {
+    static let shared = BrowsePetsWindow()
+    var window: NSWindow?
+    let gallery = Gallery()
+
+    func show(library: PetLibrary) {
+        if window == nil {
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 560),
+                             styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+            w.title = "Browse Pets"
+            w.isReleasedWhenClosed = false
+            w.contentView = NSHostingView(rootView: BrowsePetsView(gallery: gallery, library: library))
+            w.delegate = self
+            w.center()
+            window = w
+        }
+        gallery.load()
+        NSApp.activate()
+        window?.makeKeyAndOrderFront(nil)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        if SettingsWindow.shared.window?.isVisible != true { NSApp.deactivate() }
+    }
+}
+
+struct BrowsePetsView: View {
+    @ObservedObject var gallery: Gallery
+    @ObservedObject var library: PetLibrary
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 14)], spacing: 14) {
+                    ForEach(gallery.pets) { p in
+                        let installed = library.pets.contains { $0.id == "local:\(p.id)" }
+                        VStack(spacing: 6) {
+                            AsyncImage(url: gallery.previewURL(p)) { img in
+                                img.resizable().interpolation(.high).scaledToFit()
+                            } placeholder: { ProgressView().controlSize(.small) }
+                                .frame(width: 96, height: 104)
+                            Text(p.displayName).font(.system(size: 13, weight: .semibold))
+                            if let a = p.author { Text("by \(a)").font(.caption).foregroundStyle(.secondary) }
+                            if let d = p.description {
+                                Text(d).font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center).lineLimit(3)
+                            }
+                            Button(installed ? (library.selectedId == "local:\(p.id)" ? "Your pet" : "Use") : "Install") {
+                                if installed { library.selectedId = "local:\(p.id)" } else { gallery.install(p, into: library) }
+                            }
+                            .disabled(gallery.installing != nil || library.selectedId == "local:\(p.id)")
+                        }
+                        .padding(12)
+                        .frame(maxWidth: .infinity, minHeight: 236, alignment: .top)
+                        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 12))
+                    }
+                }
+                .padding(16)
+            }
+            Divider()
+            HStack {
+                Text(gallery.status).font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Link("Share your own pet", destination: URL(string: "https://github.com/\(Updater.repo)/blob/main/docs/PETS.md")!)
+                    .font(.caption)
+            }
+            .padding(.horizontal, 16).padding(.vertical, 10)
+        }
+        .frame(minWidth: 420, minHeight: 420)
+    }
+}
+
+// MARK: - Making a sprite-sheet pet from a text design
+
+/// `ClaudePet --make-pet design.json outdir/` turns a built-in-style design (four rows of
+/// pixels above the shared body, plus colors) into a Codex-format pet folder: pet.json,
+/// spritesheet.png (8×9 cells of 192×208) and preview.png.
+enum PetMaker {
+    struct Design: Decodable {
+        let id: String
+        let displayName: String
+        let description: String?
+        let author: String?
+        let top: [String]
+        let colors: [String: String]       // palette letter -> "#rrggbb"
+    }
+
+    static func color(hex: String) -> Color? {
+        let h = hex.trimmingCharacters(in: CharacterSet(charactersIn: "#"))
+        guard h.count == 6, let v = UInt32(h, radix: 16) else { return nil }
+        return Color(red: Double((v >> 16) & 0xff) / 255, green: Double((v >> 8) & 0xff) / 255, blue: Double(v & 0xff) / 255)
+    }
+
+    static func pet(from d: Design) -> BuiltinPet? {
+        guard d.top.count == 4, d.top.allSatisfy({ $0.count == 16 }) else { return nil }
+        var colors: [Character: Color] = [:]
+        for (k, v) in d.colors { if let ch = k.first, let c = color(hex: v) { colors[ch] = c } }
+        return BuiltinPet(id: d.id, name: d.displayName, top: d.top, colors: colors)
+    }
+
+    /// (mood, frame, blink, look, bob in pixels, sparks) for each animation row.
+    static func frames(row: Int) -> [(PetMood, Int, Bool, Int, Int, Bool)] {
+        switch row {
+        case 0: return [(.idle, 0, false, 0, 0, false), (.idle, 0, false, 0, 0, false), (.idle, 0, false, -1, -1, false),
+                        (.idle, 0, true, 0, -1, false), (.idle, 0, false, 1, 0, false), (.idle, 0, false, 0, 0, false)]
+        case 1, 2: return (0..<6).map { (.idle, $0, false, row == 1 ? 1 : -1, $0 % 2 == 0 ? 0 : -1, false) }
+        case 3: return (0..<4).map { (.cheering, $0, false, 0, 0, false) }
+        case 4: return [(.cheering, 1, false, 0, 0, false), (.cheering, 0, false, 0, -2, false),
+                        (.cheering, 0, false, 0, -3, false), (.cheering, 1, false, 0, -1, false)]
+        case 5: return (0..<4).map { (.sleepy, $0, false, 0, 0, false) }
+        case 6: return (0..<4).map { (.waiting, $0, false, 0, $0 % 4 < 2 ? 0 : -1, false) }
+        case 7: return (0..<6).map { (.working, $0, false, 0, $0 % 2 == 0 ? 0 : -1, true) }
+        default: return [(.idle, 0, false, -1, 0, false), (.idle, 0, false, -1, 0, false), (.idle, 0, false, 0, 0, false),
+                         (.idle, 0, false, 1, 0, false), (.idle, 0, false, 1, 0, false), (.idle, 0, true, 0, 0, false)]
+        }
+    }
+
+    static func sheet(for pet: BuiltinPet) -> CGImage? {
+        let cw = 192, ch = 208, px = 10
+        guard let ctx = CGContext(data: nil, width: cw * 8, height: ch * 9, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        func cg(_ c: Color) -> CGColor { NSColor(c).usingColorSpace(.sRGB)!.cgColor }
+        let sheetH = CGFloat(ch * 9)
+        for row in 0..<9 {
+            for (col, f) in frames(row: row).enumerated() {
+                let (mood, frame, blink, look, bob, sparks) = f
+                let rows = PixelPet.grid(mood, frame: frame, blink: blink, look: look, pet: pet)
+                let ox = col * cw + (cw - 16 * px) / 2
+                let oy = row * ch + 30 + bob * px              // top-down coordinates within the sheet
+                func fill(_ x: Int, _ y: Int, _ c: CGColor) {
+                    ctx.setFillColor(c)
+                    ctx.fill(CGRect(x: CGFloat(x), y: sheetH - CGFloat(y + px), width: CGFloat(px), height: CGFloat(px)))
+                }
+                for (y, r) in rows.enumerated() {
+                    for (x, chr) in r.enumerated() {
+                        if let c = pet.color(chr) { fill(ox + x * px, oy + y * px, cg(c)) }
+                    }
+                }
+                if sparks {
+                    for (i, s) in [(14, -2), (1, 0), (15, 3), (0, 6)].enumerated() where (frame + i) % 3 == 0 {
+                        fill(ox + s.0 * px, oy + s.1 * px, cg(PixelPet.palette["Y"]!))
+                    }
+                }
+            }
+        }
+        return ctx.makeImage()
+    }
+
+    static func png(_ img: CGImage) -> Data? { NSBitmapImageRep(cgImage: img).representation(using: .png, properties: [:]) }
+
+    static func run(designPath: String, outDir: String) -> Int32 {
+        guard let data = FileManager.default.contents(atPath: designPath),
+              let design = try? JSONDecoder().decode(Design.self, from: data) else {
+            print("Couldn't read the design at \(designPath)."); return 1
+        }
+        guard let pet = pet(from: design) else {
+            print("`top` must be 4 rows of exactly 16 characters."); return 1
+        }
+        guard let sheet = sheet(for: pet), let sheetPNG = png(sheet),
+              let first = sheet.cropping(to: CGRect(x: 0, y: 0, width: 192, height: 208)), let previewPNG = png(first) else {
+            print("Couldn't draw the sprite sheet."); return 1
+        }
+        let out = URL(fileURLWithPath: outDir)
+        do {
+            try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+            try sheetPNG.write(to: out.appendingPathComponent("spritesheet.png"))
+            try previewPNG.write(to: out.appendingPathComponent("preview.png"))
+            var manifest: [String: String] = ["id": design.id, "displayName": design.displayName, "spritesheetPath": "spritesheet.png"]
+            manifest["description"] = design.description
+            try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+                .write(to: out.appendingPathComponent("pet.json"))
+        } catch {
+            print("Couldn't write the pet: \(error.localizedDescription)"); return 1
+        }
+        print("Made \(design.displayName) in \(outDir)")
+        return 0
     }
 }
 
@@ -1461,6 +2276,8 @@ enum SelfTest {
         print("Fallback without the app's list"); testFallback(root.appendingPathComponent("b"), defaults)
         print("Terminal sessions"); testTerminal(root.appendingPathComponent("c"), defaults)
         print("Sprite sheets"); testSpriteSheet(root.appendingPathComponent("d"))
+        print("Transcripts"); testTranscripts(root.appendingPathComponent("e"))
+        print("Alerts, updates, pet maker"); testExtras(root.appendingPathComponent("f"))
 
         defaults.removePersistentDomain(forName: "local.claudepet.selftest")
         print(failures == 0 ? "All \(checks) checks passed." : "\(failures) of \(checks) checks failed.")
@@ -1715,6 +2532,87 @@ enum SelfTest {
         expect(fresh.done.isEmpty && fresh.idleCount == 1, "an idle session at startup isn't done")
     }
 
+    static func testTranscripts(_ root: URL) {
+        func line(_ o: [String: Any]) -> String { String(data: try! JSONSerialization.data(withJSONObject: o), encoding: .utf8)! }
+        func assistant(_ blocks: [[String: Any]], sidechain: Bool = false) -> String {
+            line(["type": "assistant", "isSidechain": sidechain, "message": ["role": "assistant", "content": blocks]])
+        }
+        let lines = [
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"cut",   // partial first line
+            assistant([["type": "text", "text": "Old reply"]]),
+            line(["type": "user", "message": ["role": "user", "content": "hi"]]),
+            assistant([["type": "text", "text": "\n**All 39 checks pass.** Shipping it.\nMore detail"],
+                       ["type": "tool_use", "name": "Bash", "input": ["command": "npm test\n--watch"]]]),
+            assistant([["type": "tool_use", "name": "Edit", "input": ["file_path": "/a/b/main.swift"]]], sidechain: true),
+            line(["type": "mode", "mode": "x"]),
+        ]
+        let data = Data(lines.joined(separator: "\n").utf8)
+        let p = Transcripts.parse(tail: data, fromStart: false)
+        expect(p.activity == "Running npm test", "latest tool call, first line only (got \(p.activity ?? "nil"))")
+        expect(p.lastReply == "All 39 checks pass. Shipping it.", "latest reply, first line, no markdown (got \(p.lastReply ?? "nil"))")
+        expect(Transcripts.plain("## I started [Build X](#local_1) with `npm` **now**") == "I started Build X with npm now",
+               "strips markdown (got \(Transcripts.plain("## I started [Build X](#local_1) with `npm` **now**")))")
+        expect(Transcripts.describe(tool: "Edit", input: ["file_path": "/x/y/z.swift"]) == "Editing z.swift", "describes edits")
+        expect(Transcripts.describe(tool: "mcp__github__create_issue", input: [:]) == "Using create issue (github)", "describes MCP tools")
+        expect(Transcripts.parse(tail: Data("garbage\n{".utf8), fromStart: true) == TranscriptPeek(), "garbage is ignored")
+
+        // Through the store: a busy session shows its transcript's activity.
+        let sessions = root.appendingPathComponent("sessions"), projects = root.appendingPathComponent("projects")
+        session(sessions, pid: me, id: "tx", host: nil, name: "T", status: "busy")
+        write(Array(data), to: projects.appendingPathComponent("-some-project/tx.jsonl"))
+        let store = SessionStore(sessionsDir: sessions, desktopDir: root.appendingPathComponent("none"),
+                                 leveldbDir: root.appendingPathComponent("none"), projectsDir: projects,
+                                 defaults: UserDefaults(suiteName: "local.claudepet.selftest")!)
+        store.poll()
+        expect(store.busy.first?.peek?.activity == "Running npm test", "store attaches transcript activity")
+    }
+
+    static func testExtras(_ root: URL) {
+        expect(Alerts.diff(seen: nil, now: ["a"]).isEmpty, "nothing alerts at launch")
+        expect(Alerts.diff(seen: ["a"], now: ["a", "b"]) == ["b"], "only new ones alert")
+        expect(Alerts.diff(seen: ["a", "b"], now: ["b"]).isEmpty, "a cleared one doesn't alert")
+        expect(Updater.isNewer("0.4.0", than: "0.3.5"), "0.4.0 > 0.3.5")
+        expect(Updater.isNewer("v0.10.0", than: "0.9.9"), "numeric, not text, comparison")
+        expect(!Updater.isNewer("0.3.5", than: "0.3.5"), "same version isn't newer")
+        expect(!Updater.isNewer("0.3", than: "0.3.0"), "missing parts count as zero")
+
+        let design = root.appendingPathComponent("pip.json"), out = root.appendingPathComponent("pip")
+        writeJSON(["id": "pip", "displayName": "Pip", "description": "Test",
+                   "top": ["................", ".......KK.......", "......KWWK......", ".....KWWWWK....."],
+                   "colors": ["O": "#F2C94C", "W": "#FFE58A"]], to: design)
+        expect(PetMaker.run(designPath: design.path, outDir: out.path) == 0, "makes a pet")
+        if let sheet = SpriteSheet(url: out.appendingPathComponent("spritesheet.png")) {
+            expect(sheet.frames(for: .idle).count == 6 && sheet.frames(for: .running).count == 6
+                   && sheet.frames(for: .jump).count == 4, "the made sheet has every animation row")
+        } else {
+            expect(false, "the made sheet loads")
+        }
+        // Gallery install from a local gallery folder.
+        let gallery = root.appendingPathComponent("gallery/"), dest = root.appendingPathComponent("installed/pip")
+        try? FileManager.default.createDirectory(at: gallery, withIntermediateDirectories: true)
+        try? FileManager.default.copyItem(at: out, to: gallery.appendingPathComponent("pip"))
+        let entry = GalleryPet(id: "pip", displayName: "Pip", description: nil, author: nil,
+                               spritesheetPath: "spritesheet.png", preview: "preview.png")
+        var problem: String?? = .none
+        Gallery.download(entry, from: gallery, to: dest) { problem = .some($0) }
+        let deadline = Date().addingTimeInterval(5)
+        while problem == nil && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        expect(problem == .some(nil), "installs a gallery pet (\(String(describing: problem)))")
+        expect(SpriteSheet(url: dest.appendingPathComponent("spritesheet.png")) != nil, "the installed pet loads")
+        let missing = GalleryPet(id: "nope", displayName: "Nope", description: nil, author: nil, spritesheetPath: "x.png", preview: nil)
+        var missingProblem: String?? = .none
+        Gallery.download(missing, from: gallery, to: root.appendingPathComponent("installed/nope")) { missingProblem = .some($0) }
+        while missingProblem == nil && Date() < deadline.addingTimeInterval(5) { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        expect(missingProblem != .some(nil) && missingProblem != nil, "a missing pet reports a problem")
+        // The real gallery index decodes.
+        if let idx = FileManager.default.contents(atPath: "pets/index.json") {
+            expect((try? JSONDecoder().decode([GalleryPet].self, from: idx))?.count ?? 0 >= 2, "pets/index.json decodes")
+        }
+
+        writeJSON(["id": "bad", "displayName": "Bad", "top": ["short"], "colors": [:]], to: design)
+        expect(PetMaker.run(designPath: design.path, outDir: root.appendingPathComponent("bad").path) == 1, "rejects a bad design")
+    }
+
     static func testSpriteSheet(_ root: URL) {
         let w = 8 * 192, h = 9 * 208
         guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
@@ -1753,13 +2651,29 @@ enum ClaudePetMain {
             return
         }
         if args.contains("--self-test") { exit(SelfTest.run()) }
+        if let window = ["--settings", "--browse-pets"].first(where: args.contains) {
+            let running = NSRunningApplication.runningApplications(withBundleIdentifier: "local.claudepet")
+                .contains { $0 != NSRunningApplication.current && !$0.isTerminated }
+            if running {
+                DistributedNotificationCenter.default().postNotificationName(
+                    .init("local.claudepet.open"), object: window, userInfo: nil, deliverImmediately: true)
+                exit(0)
+            }
+            AppDelegate.openOnLaunch = window
+        }
+        if let i = args.firstIndex(of: "--make-pet"), i + 2 < args.count {
+            exit(PetMaker.run(designPath: args[i + 1], outDir: args[i + 2]))
+        }
         if args.contains("--dump") {
             // Prints what the pet sees right now, for debugging.
             let store = SessionStore()
             store.poll()
             print("app unread list:", store.unread.ids.map { "\($0.count) chats" } ?? "not found (using timestamps)")
             for (label, list) in [("needs you", store.waiting), ("working", store.busy), ("done", store.done)] {
-                for s in list { print("\(label): \(s.name)\(s.pid == 0 ? " (no process)" : "")") }
+                for s in list {
+                    let detail = label == "done" ? s.peek?.lastReply : s.peek?.activity
+                    print("\(label): \(s.name)\(s.pid == 0 ? " (no process)" : "")\(detail.map { " — \($0)" } ?? "")")
+                }
             }
             print("idle:", store.idleCount)
             exit(0)

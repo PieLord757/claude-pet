@@ -1,0 +1,13 @@
+{
+  "id": "pip",
+  "displayName": "Pip",
+  "description": "A sunny little chick with a stubborn tuft.",
+  "author": "PieLord757",
+  "top": [
+    ".......KK.......",
+    "......KWWK......",
+    ".....KWWWWK.....",
+    "....KKWWWWKK...."
+  ],
+  "colors": { "O": "#F6C445", "o": "#D9A322", "W": "#FFE68A", "R": "#FF9E80", "M": "#E8762C" }
+}

@@ -1,0 +1,13 @@
+{
+  "id": "ember",
+  "displayName": "Ember",
+  "description": "A tiny purple imp who stays up late with your builds.",
+  "author": "PieLord757",
+  "top": [
+    "..R..........R..",
+    "..RK........KR..",
+    "...RK......KR...",
+    "....KKKKKKKK...."
+  ],
+  "colors": { "O": "#8C6BD9", "o": "#664DAD", "R": "#FF8A5B", "M": "#3B2152" }
+}

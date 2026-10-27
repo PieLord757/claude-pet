@@ -6,7 +6,9 @@ Every running Claude Code session writes a small status file to `~/.claude/sessi
 - A session counts only while its process is alive (`kill(pid, 0)`).
 - A busy → idle change shows as **Done** after a 3 second debounce, and expires after 30 minutes.
 - For chats in the Claude desktop app, **Done** mirrors the app's own unread list (the sidebar's blue dots), so a card clears as soon as you read that chat in Claude, and unread chats show up even if their process has stopped or the pet was just started. The pet reads that list from the app's local storage log (`~/Library/Application Support/Claude/Local Storage/leveldb/*.log`, key `epitaxy-unread-v1`) and chat titles and times from `~/Library/Application Support/Claude/claude-code-sessions/`. If the list isn't available it falls back to comparing each chat's last turn with when you last opened it. Terminal sessions have no desktop chat, so they're done when the pet sees them finish, and clear after 30 minutes or with right-click → Clear Finished.
-- The app makes no network requests. It writes only its own preferences (`defaults read local.claudepet`) and the pets you import.
+- For chats on the list, it reads the end of the chat's transcript (`~/.claude/projects/<project>/<session>.jsonl`, last 160 KB, only when it grows) to show the latest tool Claude used and the first line of its latest reply. Settings → "Show what each chat is doing" turns this off.
+- Network: a daily `GET` of the latest release from the GitHub API (can be turned off), and the gallery index and files from this repo when you open Browse Pets. Nothing else, and nothing about your chats.
+- It writes only its own preferences (`defaults read local.claudepet`) and the pets you install.
 
 ⚠️ These files are internal details of Claude Code and the desktop app, not documented APIs. A future update could change them and break the pet. If that happens, the parsing lives in `SessionStore`, `DesktopChats` and `DesktopUnread`.
 
@@ -21,6 +23,14 @@ Everything is in [`Sources/main.swift`](Sources/main.swift):
 - **`PetView` / `ControlPill` / `SessionStack` / `SessionToast`** are the SwiftUI interface.
 - **`AppDelegate`** creates the always-on-top, all-desktops panel and sizes it to its content.
 - **`IconRenderer`** draws the app icon from the Sprout sprite (`ClaudePet --render-icon <dir>`).
+
+### Command-line flags
+
+- `--self-test` runs the checks (`build.sh` does this).
+- `--dump` prints what the pet sees right now.
+- `--settings` / `--browse-pets` open those windows in the running pet.
+- `--make-pet design.json outdir/` turns a text design into a pet (see [PETS.md](PETS.md)).
+- `--render-icon dir/` draws the app icon.
 
 ### Tests and debugging
 

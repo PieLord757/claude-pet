@@ -26,7 +26,14 @@ Claude Pet sits on top of whatever you're doing and answers that at a glance:
 - 🔵 **Working**: Claude is busy
 - 🟢 **Done**: a chat finished and you haven't read it yet (it matches the blue dots in Claude's sidebar)
 
-Click a card to jump straight into that chat. The pet reacts too: it naps when nothing is running, puts on goggles while Claude works, and jumps when something finishes.
+Each card says what that chat is up to ("Running npm test", "Editing main.swift", or the first line of Claude's reply), and clicking it jumps straight into the chat. The pet reacts too: it naps when nothing is running, puts on goggles while Claude works, and jumps when something finishes.
+
+**Also in the box**
+
+- 🔔 Optional sounds and notifications when a chat needs you or finishes (all off until you turn them on)
+- 🐾 A pet gallery: right-click → **Browse Pets…** to install community pets in one click
+- 🎉 A "chats finished today" count, and a shareable **pet card** image of your day
+- ⚙️ A Settings window (right-click → **Settings…**), with "Open at login" and update checks
 
 ## Install
 
@@ -68,9 +75,9 @@ open ClaudePet.app
 
 <p align="center"><img src="docs/pets.png" width="560" alt="The built-in pets: Sprout, Mochi and Bolt"></p>
 
-Right-click the pet → **Pet** to switch between Sprout, Mochi and Bolt, or **Import Pet…** to bring your own. Claude Pet reads the same sprite format as Codex pets, and any pets you already have in `~/.codex/pets` show up automatically.
+Right-click the pet → **Pet** to switch between Sprout, Mochi and Bolt, **Browse Pets…** for the community gallery (Pip and Ember so far), or **Import Pet…** to bring your own. Claude Pet reads the same sprite format as Codex pets, and any pets you already have in `~/.codex/pets` show up automatically.
 
-**Made a pet?** See [docs/PETS.md](docs/PETS.md) for the format, then [share it](../../issues/new?template=new-pet.yml) so it can join the gallery.
+**Make a pet in five minutes:** draw four rows of pixels as text, run `ClaudePet --make-pet`, and you get a full animated sprite sheet. [docs/PETS.md](docs/PETS.md) shows how, and how to add it to the gallery.
 
 ## Using it
 
@@ -80,14 +87,16 @@ Right-click the pet → **Pet** to switch between Sprout, Mochi and Bolt, or **I
 | Drag the pet | Move it (the position is remembered) |
 | ✎ in the pill | Start a new Claude Code session |
 | Click a card | Open that chat in Claude (a terminal session brings its terminal forward) |
-| Right-click the pet | Pets, size, idle sessions, clear finished, reset position, **Close Pet** |
+| Right-click the pet | **Settings…**, pets, gallery, size, clear finished, pet card, reset position, **Close Pet** |
 
 - **Open it:** `⌘ Space` → **ClaudePet**. **Start at login:** System Settings → General → Login Items → **+**.
 - **`/pet` in Claude Code (optional):** `mkdir -p ~/.claude/commands && cp extras/pet.md ~/.claude/commands/pet.md`, then `/pet` opens it and `/pet close` closes it.
 
 ## Privacy
 
-Everything stays on your Mac. The pet makes **no network requests**. It only reads Claude Code's local session status files and the desktop app's local chat list, and it writes only its own preferences and the pets you import. Details in [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md).
+Everything stays on your Mac. The pet reads Claude Code's local session status files, the end of each active chat's local transcript (to say what it's doing), and the desktop app's local unread list. It writes only its own preferences and the pets you install.
+
+It goes online in two cases: once a day to check GitHub for a new version (Settings → turn off "Check for updates automatically"), and when you open **Browse Pets**. Nothing about your chats is ever sent anywhere. Details in [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md).
 
 ## FAQ
 

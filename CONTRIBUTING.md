@@ -36,6 +36,8 @@ Everything is in [`Sources/main.swift`](Sources/main.swift). [docs/HOW-IT-WORKS.
 
 ## Releasing (maintainers)
 
-1. Bump `CFBundleShortVersionString` in `build.sh`, run `./build.sh`, and zip with `ditto -c -k --keepParent ClaudePet.app ClaudePet.zip`.
-2. `gh release create vX.Y.Z ClaudePet.zip --title ... --notes ...`
-3. Update the Homebrew cask in [PieLord757/homebrew-tap](https://github.com/PieLord757/homebrew-tap): set `version` and `sha256` (`shasum -a 256 ClaudePet.zip`) in `Casks/claude-pet.rb`.
+```bash
+scripts/release.sh 0.4.1
+```
+
+That bumps `VERSION`, builds and tests locally, then tags and pushes. The **Release** workflow builds, tests and publishes the release with the zip; the tap's **Bump cask** workflow updates Homebrew within six hours (or run it by hand from the tap's Actions tab).

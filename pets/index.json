@@ -1,0 +1,18 @@
+[
+  {
+    "id": "pip",
+    "displayName": "Pip",
+    "description": "A sunny little chick with a stubborn tuft.",
+    "author": "PieLord757",
+    "spritesheetPath": "spritesheet.png",
+    "preview": "preview.png"
+  },
+  {
+    "id": "ember",
+    "displayName": "Ember",
+    "description": "A tiny purple imp who stays up late with your builds.",
+    "author": "PieLord757",
+    "spritesheetPath": "spritesheet.png",
+    "preview": "preview.png"
+  }
+]
