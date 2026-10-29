@@ -1106,6 +1106,28 @@ struct SessionStack: View {
     let second: Int          // changes every second so the times on the cards tick
     @ObservedObject var stats = Stats.shared
     static let maxCards = 5
+    @State private var expanded = false
+    @State private var listHeight: CGFloat = 0
+
+    /// The tallest the full list gets before it scrolls: the room between the pet's top edge
+    /// and the bottom of its screen, less the pet above the list and the footer below it.
+    static var maxListHeight: CGFloat {
+        guard let panel = (NSApp.delegate as? AppDelegate)?.panel else { return 400 }
+        let top = NSPoint(x: panel.frame.minX + 40, y: panel.frame.maxY - 20)
+        let bottom = (NSScreen.screens.first { $0.frame.contains(top) } ?? panel.screen ?? NSScreen.main)?.visibleFrame.minY ?? 0
+        return max(160, panel.frame.maxY - bottom - 230)
+    }
+
+    func cards(_ list: ArraySlice<Item>) -> some View {
+        VStack(spacing: 6) {
+            ForEach(list) { item in
+                SessionToast(session: item.session, kind: item.kind, detail: item.detail, time: item.time) {
+                    store.markOpened(item.session)
+                    openSession(item.session)
+                }
+            }
+        }
+    }
 
     struct Item: Identifiable {
         let session: SessionInfo
@@ -1146,16 +1168,31 @@ struct SessionStack: View {
                     .padding(.horizontal, 14).padding(.vertical, 9)
                     .card(radius: 14)
             }
-            ForEach(all.prefix(Self.maxCards)) { item in
-                SessionToast(session: item.session, kind: item.kind, detail: item.detail, time: item.time) {
-                    store.markOpened(item.session)
-                    openSession(item.session)
+            if expanded && all.count > Self.maxCards {
+                // Every card, scrolling once the list would run off the screen.
+                ScrollView(.vertical, showsIndicators: false) {
+                    cards(all[...])
+                        .background(GeometryReader { g in
+                            Color.clear
+                                .onAppear { listHeight = g.size.height }
+                                .onChange(of: g.size.height) { _, h in listHeight = h }
+                        })
+                        .padding(6)             // room for the card shadows inside the scroll area
                 }
+                .frame(height: min(listHeight + 12, Self.maxListHeight))
+                .padding(-6)
+            } else {
+                cards(all.prefix(Self.maxCards))
             }
             if all.count > Self.maxCards {
-                Button { activateClaude() } label: {
-                    Text("+\(all.count - Self.maxCards) more")
-                        .font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
+                Button { expanded.toggle() } label: {
+                    HStack(spacing: 4) {
+                        Text(expanded ? "Show less" : "+\(all.count - Self.maxCards) more")
+                        Image(systemName: expanded ? "chevron.up" : "chevron.down").font(.system(size: 8, weight: .bold))
+                    }
+                    .font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
+                    .padding(.horizontal, 12).padding(.vertical, 4)
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }
